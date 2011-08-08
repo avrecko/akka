@@ -19,7 +19,7 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
   val scalaCompileSettings =
     Seq("-deprecation",
         //"-Xmigration",
-        "-optimise",
+        //"-optimise",
         "-encoding", "utf8")
 
   val javaCompileSettings = Seq("-Xlint:unchecked")
@@ -136,6 +136,8 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     lazy val redis            = "net.debasishg"               % "redisclient_2.9.0"       % "2.3.1"            //ApacheV2
     lazy val mongoAsync       = "com.mongodb.async"           % "mongo-driver_2.9.0-1"    % "0.2.7"      //ApacheV2
 
+    lazy val guava = "com.google.guava" % "guava" % "r09" // ApacheV2
+
     // Test
 
     lazy val commons_coll   = "commons-collections"    % "commons-collections" % "3.2.1"           % "test" //ApacheV2
@@ -147,6 +149,8 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     lazy val junit          = "junit"                  % "junit"               % "4.5"             % "test" //Common Public License 1.0
     lazy val mockito        = "org.mockito"            % "mockito-all"         % "1.8.1"           % "test" //MIT
     lazy val scalatest      = "org.scalatest"          %% "scalatest"          % SCALATEST_VERSION % "test" //ApacheV2
+
+    lazy val asmAll = "asm" % "asm-all" % "3.3.1" % "test"// BSD Like
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -323,10 +327,12 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     val netty         = Dependencies.netty
     val protobuf      = Dependencies.protobuf
     val sjson         = Dependencies.sjson
+    val guava = Dependencies.guava
 
     // testing
     val junit     = Dependencies.junit
     val scalatest = Dependencies.scalatest
+    val asmAll = Dependencies.asmAll
 
     lazy val networkTestsEnabled = systemOptional[Boolean]("akka.test.network", false)
 

@@ -54,6 +54,7 @@ import java.util.concurrent.atomic.{ AtomicReference, AtomicBoolean }
 import java.util.concurrent._
 import akka.AkkaException
 import java.util.Queue
+import akka.remote.rcl.RemoteClassLoading
 
 class RemoteClientMessageBufferException(message: String, cause: Throwable = null) extends AkkaException(message, cause)
 
@@ -106,7 +107,7 @@ trait NettyRemoteClientModule extends RemoteClientModule {
               remoteClients.get(key) match { //Recheck for addition, race between upgrades
                 case s: Some[RemoteClient] ⇒ s.get //If already populated by other writer
                 case None ⇒ //Populate map
-                  val client = new ActiveRemoteClient(this, address, loader, notifyListeners)
+                  val client = if(RemoteClassLoading.enabled) new RemoteClassLoadingActiveRemoteClient(this, address, loader, notifyListeners) else new ActiveRemoteClient(this, address, loader, notifyListeners)
                   client.connect()
                   remoteClients += key -> client
                   client
@@ -207,11 +208,15 @@ abstract class RemoteClient private[akka] (
   /**
    * Returns an array with the current pending messages not yet delivered.
    */
+
+
+
+
   def pendingMessages: Array[Any] = {
     var messages = Vector[Any]()
     val iter = resendMessageQueue.iterator
     while (iter.hasNext) {
-      messages = messages :+ MessageSerializer.deserialize(iter.next.getMessage, loader)
+      messages = messages :+ deserialize(iter.next.getMessage)
     }
     messages.toArray
   }
@@ -270,7 +275,7 @@ abstract class RemoteClient private[akka] (
       val resultFuture = if (request.getOneWay) {
         if (itIsOkToTryToWriteMessage) { //Only attempt write if message wasn't appended to pending
           try {
-            val future = currentChannel.write(RemoteEncoder.encode(request))
+            val future = currentChannel.write(encode(request))
             future.awaitUninterruptibly()
             if (!future.isCancelled && !future.isSuccess) {
               notifyListeners(RemoteClientWriteFailed(request, future.getCause, module, remoteAddress))
@@ -310,7 +315,7 @@ abstract class RemoteClient private[akka] (
           var future: ChannelFuture = null
           try {
             // try to send the original one
-            future = currentChannel.write(RemoteEncoder.encode(request))
+            future = currentChannel.write(encode(request))
             future.awaitUninterruptibly()
             if (future.isCancelled) futures.remove(futureUuid) // Clean up future
             else if (!future.isSuccess) handleRequestReplyError(future)
@@ -349,7 +354,7 @@ abstract class RemoteClient private[akka] (
             case None      ⇒ Some(new DefaultChannelFuture(currentChannel, true))
           }
           try {
-            currentChannel.write(RemoteEncoder.encode(pending)).addListener(new SendPendingMessageListener(pending, newSignal))
+            currentChannel.write(encode(pending)).addListener(new SendPendingMessageListener(pending, newSignal))
           } catch {
             case e ⇒
               resendMessageQueueLock.tryUnlock() //Clean up
@@ -394,6 +399,11 @@ abstract class RemoteClient private[akka] (
     if (!actorRef.supervisor.isDefined) throw new IllegalActorStateException(
       "Can't unregister supervisor for " + actorRef + " since it is not under supervision")
     else supervisors.remove(actorRef.supervisor.get.uuid)
+
+
+  def deserialize(protocol: MessageProtocol):Any = MessageSerializer.deserialize(protocol, loader)
+
+  def encode(protocol: RemoteMessageProtocol): AkkaRemoteProtocol = RemoteEncoder.encode(protocol)
 }
 
 /**
@@ -495,6 +505,19 @@ class ActiveRemoteClient private[akka] (
   private[akka] def resetReconnectionTimeWindow = reconnectionTimeWindowStart = 0L
 }
 
+class RemoteClassLoadingActiveRemoteClient(module: NettyRemoteClientModule, remoteAddress: InetSocketAddress,
+  loader: Option[ClassLoader] = None, notifyListenersFun: (⇒ Any) ⇒ Unit) extends ActiveRemoteClient(module, remoteAddress, loader, notifyListenersFun){
+
+  override def deserialize(protocol: MessageProtocol) = {
+
+  }
+
+  override def encode(protocol: RemoteMessageProtocol) = {
+    null
+  }
+}
+
+
 /**
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
@@ -555,7 +578,7 @@ class ActiveRemoteClientHandler(
 
             case future ⇒
               if (reply.hasMessage) {
-                val message = MessageSerializer.deserialize(reply.getMessage, client.loader)
+                val message = client.deserialize(reply.getMessage)
                 future.completeWithResult(message)
               } else {
                 val exception = parseException(reply, client.loader)
@@ -914,7 +937,7 @@ class RemoteServerPipelineFactory(
       case _      ⇒ (Nil, Nil)
     }
 
-    val remoteServer = new RemoteServerHandler(name, openChannels, loader, server)
+    val remoteServer = if(RemoteClassLoading.enabled) new RemoteClassLoadingServerHandler(name, openChannels, loader, server)  else new RemoteServerHandler(name, openChannels, loader, server)
     val stages: List[ChannelHandler] = dec ::: lenDec :: protobufDec :: enc ::: lenPrep :: protobufEnc :: executor :: remoteServer :: Nil
 
     new StaticChannelPipeline(stages: _*)
@@ -1031,6 +1054,7 @@ class RemoteServerHandler(
       EventHandler.error(e, this, e.getMessage)
   }
 
+
   private def dispatchToActor(request: RemoteMessageProtocol, channel: Channel) {
     val actorInfo = request.getActorInfo
 
@@ -1043,7 +1067,7 @@ class RemoteServerHandler(
           return
       }
 
-    val message = MessageSerializer.deserialize(request.getMessage, applicationLoader)
+    val message = deserialize(request.getMessage)
     val sender =
       if (request.hasSender) Some(RemoteActorSerialization.fromProtobufToRemoteActorRef(request.getSender, applicationLoader))
       else None
@@ -1080,7 +1104,7 @@ class RemoteServerHandler(
                 // FIXME lift in the supervisor uuid management into toh createRemoteMessageProtocolBuilder method
                 if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
 
-                write(channel, RemoteEncoder.encode(messageBuilder.build))
+                write(channel, encode(messageBuilder.build))
             }))
     }
   }
@@ -1121,7 +1145,7 @@ class RemoteServerHandler(
       targetMethod
     }
 
-    MessageSerializer.deserialize(request.getMessage, applicationLoader) match {
+    deserialize(request.getMessage) match {
       case RemoteActorSystemMessage.Stop ⇒
         if (UNTRUSTED_MODE) throw new SecurityException("Remote server is operating is untrusted mode, can not stop the actor")
         else TypedActor.poisonPill(typedActor) //TODO stop may block, but it might be better to do spawn { typedActor.stop() }
@@ -1148,7 +1172,7 @@ class RemoteServerHandler(
                 None)
               if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
 
-              write(channel, RemoteEncoder.encode(messageBuilder.build))
+              write(channel, encode(messageBuilder.build))
             } catch {
               case e: Exception ⇒
                 EventHandler.error(e, this, e.getMessage)
@@ -1335,7 +1359,7 @@ class RemoteServerHandler(
       actorType,
       None)
     if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
-    RemoteEncoder.encode(messageBuilder.build)
+    encode(messageBuilder.build)
   }
 
   private def authenticateRemoteClient(request: RemoteMessageProtocol, ctx: ChannelHandlerContext) = {
@@ -1353,6 +1377,29 @@ class RemoteServerHandler(
   }
 
   protected def parseUuid(protocol: UuidProtocol): Uuid = uuidFrom(protocol.getHigh, protocol.getLow)
+
+  def encode(rmp: RemoteMessageProtocol): AkkaRemoteProtocol = RemoteEncoder.encode(rmp)
+
+  def deserialize(protocol: MessageProtocol) = MessageSerializer.deserialize(protocol, applicationLoader)
+
+}
+
+class RemoteClassLoadingServerHandler(name: String,
+                                      openChannels: ChannelGroup,
+                                      applicationLoader: Option[ClassLoader],
+                                      server: NettyRemoteServerModule) extends RemoteServerHandler(name, openChannels,applicationLoader,server){
+
+  override def encode(rmp: RemoteMessageProtocol): AkkaRemoteProtocol = {
+    println("Remote Class Loading Encoding")
+    val arp = AkkaRemoteProtocol.newBuilder
+    arp.setMessage(rmp)
+    arp.build
+  }
+
+  override def deserialize(protocol: MessageProtocol) = {
+     MessageSerializer.deserialize(protocol, applicationLoader)
+  }
+
 }
 
 class DefaultDisposableChannelGroup(name: String) extends DefaultChannelGroup(name) {

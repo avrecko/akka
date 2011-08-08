@@ -14,6 +14,7 @@ option optimize_for = SPEED;
 message AkkaRemoteProtocol {
   optional RemoteMessageProtocol message = 1;
   optional RemoteControlProtocol instruction = 2;
+  repeated MetadataEntryProtocol metadata = 3;
 }
 
 /**
@@ -27,8 +28,8 @@ message RemoteMessageProtocol {
   optional ExceptionProtocol exception = 5;
   optional UuidProtocol supervisorUuid = 6;
   optional RemoteActorRefProtocol sender = 7;
-  repeated MetadataEntryProtocol metadata = 8;
-  optional string cookie = 9;
+  // repeated MetadataEntryProtocol metadata = 3; goes to AkkaRemoteProtocol
+  optional string cookie = 8;
 }
 
 /**
@@ -103,6 +104,7 @@ message MessageProtocol {
   required SerializationSchemeType serializationScheme = 1;
   required bytes message = 2;
   optional bytes messageManifest = 3;
+  optional UuidProtocol rclId = 4;
 }
 
 /**

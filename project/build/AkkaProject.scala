@@ -85,6 +85,7 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
   lazy val JETTY_VERSION         = "7.4.0.v20110414"
   lazy val JAVAX_SERVLET_VERSION = "3.0"
   lazy val SLF4J_VERSION         = "1.6.0"
+  lazy val ARQUILLIAN_VERSION    = "1.0.0.Alpha5"
 
   // -------------------------------------------------------------------------------------------------------------------
   // Dependencies
@@ -139,7 +140,6 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     lazy val guava = "com.google.guava" % "guava" % "r09" // ApacheV2
 
     // Test
-
     lazy val commons_coll   = "commons-collections"    % "commons-collections" % "3.2.1"           % "test" //ApacheV2
     lazy val commons_math   = "org.apache.commons"     % "commons-math"        % "2.1"             % "test" //ApacheV2
 
@@ -151,6 +151,7 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     lazy val scalatest      = "org.scalatest"          %% "scalatest"          % SCALATEST_VERSION % "test" //ApacheV2
 
     lazy val asmAll = "asm" % "asm-all" % "3.3.1" % "test"// BSD Like
+    lazy val arquillianJunit = "org.jboss.arquillian" % "arquillian-junit" % ARQUILLIAN_VERSION % "test"
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -333,8 +334,10 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     val junit     = Dependencies.junit
     val scalatest = Dependencies.scalatest
     val asmAll = Dependencies.asmAll
+    val arquillianJunit = Dependencies.arquillianJunit
 
     lazy val networkTestsEnabled = systemOptional[Boolean]("akka.test.network", false)
+    lazy val useTestConfig = systemOptional[String]("akka.config", "fobar")
 
     override def testOptions = super.testOptions ++ {
       if (!networkTestsEnabled.value) Seq(TestFilter(test => !test.endsWith("NetworkTest")))

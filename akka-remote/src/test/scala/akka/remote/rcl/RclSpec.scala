@@ -7,28 +7,85 @@ import org.scalatest.matchers.MustMatchers
 import akka.event.EventHandler.DefaultListener
 import org.scalatest.{BeforeAndAfterAll, FeatureSpec, GivenWhenThen}
 import akka.util.duration._
+import org.jboss.shrinkwrap.api.spec.JavaArchive
+import java.io.File
+import com.google.common.io.Files
+import annotation.tailrec
+import collection.mutable.ListBuffer
+import com.google.common.collect.Lists
+import org.jboss.shrinkwrap.api.{ArchivePaths, ShrinkWrap}
+import org.jboss.shrinkwrap.api.classloader.ShrinkWrapClassLoader
+import org.jboss.shrinkwrap.api.importer.ExplodedImporter
+import java.lang.ClassNotFoundException
 
-class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with MustMatchers {
-
+object RclSpecSettings {
   val host = "localhost"
   val port = 4270
   val timeout = 2.seconds
 
-  val maxNumberToSend = 10
-  val runs = 10
+  val maxNumberToSend = 3
+  val runs = 1
+}
 
+class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with MustMatchers {
+
+
+  // we will operate on Akka loaded in two seperate class loaders
+  def createAkkaJar(): JavaArchive = {
+    val akkaJar = ShrinkWrap.create(classOf[JavaArchive])
+    // I HATE SBT whoever made SBT deserves a good Neal Ford style slap in the face. Look ma, I am going to make a new build tool...SLAPPPP!!!
+    // A simple matter of System.getProperty("java.class.path") becomes a nightmare
+
+    // ok lets get the location on disk where this class is loaded
+    val url = this.getClass.getClassLoader.getResource(this.getClass.getName.replace('.', '/') + ".class")
+    var file = new File(url.getFile)
+    // lets find the project root we assume we have root/remote/target/test-classes/my/package/this.class
+    val packageDepth = this.getClass.getClass.getName.count(_ == '.') + 4 // to get to the root
+
+    for (i <- 0.to(packageDepth)) {
+      file = file.getParentFile
+    }
+
+    val classesDirectories = findAllClassesDirectories(file, ListBuffer[File]())
+
+    classesDirectories.foreach((file) => {
+      akkaJar.merge(ShrinkWrap.create(classOf[JavaArchive]).as(classOf[ExplodedImporter]).importDirectory(file).as(classOf[JavaArchive]));
+    })
+
+    akkaJar
+  }
+
+  private def findAllClassesDirectories(root: File, accumulator: ListBuffer[File]): ListBuffer[File] = {
+    if (root.isDirectory && !root.getName.startsWith(".")) {
+      if (root.getName == "classes" || root.getName == "test-classes") {
+        accumulator.append(root)
+      } else {
+        root.listFiles().foreach(findAllClassesDirectories(_, accumulator))
+      }
+    }
+    accumulator
+  }
+
+  class ScalaLibraryOnlyClassLoader extends ClassLoader(this.getClass.getClassLoader) {
+    // we are non-delegating class loader except for scala and java
+    override def loadClass(fqn: String, resolve: Boolean) = {
+      if (!fqn.startsWith("akka.")) super.loadClass(fqn, resolve) else throw new ClassNotFoundException(fqn)
+    }
+  }
+
+  val nodeA = new ShrinkWrapClassLoader(new ScalaLibraryOnlyClassLoader, createAkkaJar())
 
   feature("Remote Class Loading") {
     info("If the bytecode required to deserialize the message is not on the classpath")
     info("It will be loaded transparently by akka")
 
 
-    val actor = remote.actorFor("test", host, port)
-    val messageOrderActor = remote.actorFor("message-order-test", host, port)
+    val actor = remote.actorFor("test", RclSpecSettings.host, RclSpecSettings.port)
+    val messageOrderActor = remote.actorFor("message-order-test", RclSpecSettings.host, RclSpecSettings.port)
 
     scenario("Sending java. and scala. code should work as expected") {
       given("Simple string should return a simple response")
-      val reply = (actor.?("PING")(timeout=timeout)).as[String]
+      val reply = (actor.?("PING")(timeout = RclSpecSettings.timeout)).as[String]
       reply.get must equal("PONG")
     }
 
@@ -37,12 +94,12 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
       val msg = Messages.newBar()
       when("the message is sent to the server node")
 
-      val reply = (actor.?(msg)(timeout=timeout)).as[AnyRef]
+      val reply = (actor.?(msg)(timeout = RclSpecSettings.timeout)).as[AnyRef]
 
       then("remote node should ask the client node to supply it with the bytecode")
       and("complete then complete the message invocation normally")
 
-      msg.getClass must be eq(reply.get.getClass)
+      msg.getClass must be eq (reply.get.getClass)
     }
 
     scenario("Two messages with same class name but different bytecode are sent") {
@@ -51,8 +108,8 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
       val msg2 = Messages.newFooSimpleInheritenceB
 
       when("the two messages are received on the server node")
-      val reply1 = (actor.?(msg1)(timeout= timeout)).as[AnyRef]
-      val reply2 = (actor.?(msg2)(timeout= timeout)).as[AnyRef]
+      val reply1 = (actor.?(msg1)(timeout = RclSpecSettings.timeout)).as[AnyRef]
+      val reply2 = (actor.?(msg2)(timeout = RclSpecSettings.timeout)).as[AnyRef]
 
       then("remote node should resolve the missing bytecode correctly with classloaders in mind")
       and("complete the invocations normally")
@@ -66,7 +123,7 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
       val msg = Messages.newBazCyclic
 
       when("the two messages are received on the server node")
-      val reply1 = (actor.?(msg)(timeout=timeout)).as[AnyRef]
+      val reply1 = (actor.?(msg)(timeout = RclSpecSettings.timeout)).as[AnyRef]
 
       then("remote node should resolve the missing bytecode correctly with classloaders in mind")
       and("complete the invocations normally")
@@ -78,51 +135,63 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
       clazz must equal(clazz1)
     }
 
-    scenario("A message ordering must be respect at all times specially when RCL request happens"){
-      for (i <- 1 to runs){
+    scenario("A message ordering must be respect at all times specially when RCL request happens") {
+      for (i <- 1 to RclSpecSettings.runs) {
         messageOrderActor ! Messages.newDummyAlwaysNewCl
-        for (n <- 1 to maxNumberToSend) messageOrderActor ! n
-        val outOfOrder = (messageOrderActor.?( MessageOrderTestConstants.isOutOfOrder)(timeout=timeout)).as[Boolean]
+        for (n <- 1 to RclSpecSettings.maxNumberToSend) messageOrderActor ! n
+        val outOfOrder = (messageOrderActor.?(MessageOrderTestConstants.isOutOfOrder)(timeout = RclSpecSettings.timeout)).as[Boolean]
         outOfOrder.get must equal(false)
       }
     }
 
-    scenario("If bytecode is not available the message should be forwared to remote server/client") {  pending }
-    scenario("If bytecode response is not recevied the code should retry sending the BCRequest a few more times") {  pending }
-    scenario("If more than specified amount of messages are recevied while waiting for BCResponse the overflowing messages should be dropped") { pending }
-    scenario("The user specified class loader must be respected by client and serverm") { pending }
+    scenario("If bytecode is not available the message should be forwared to remote server/client") {
+      pending
+    }
+    scenario("If bytecode response is not recevied after some time the code should blacklist the class and forward to remote server/client") {
+      pending
+    }
+    scenario("If more than specified amount of messages are recevied while waiting for BCResponse the overflowing messages should be dropped") {
+      pending
+    }
+    scenario("The user specified class loader must be respected by client and serverm") {
+      pending
+    }
 
 
   }
 
-  val optimizedLocals = remote.asInstanceOf[NettyRemoteSupport].optimizeLocal.get()
-
   override def beforeAll() = {
-    remote.addListener(actorOf[DefaultListener].start)
-    // make sure all calls are made via remoting (with serialization)
-    remote.asInstanceOf[NettyRemoteSupport].optimizeLocal.set(false)
-
-    remote.start(host, port)
-    remote.register("test", actorOf[EchoActor])
-    remote.register("message-order-test", actorOf(new MessageOrderTestActor(maxNumberToSend)))
-
+    nodeA.loadClass(classOf[NodeA_Start].getName).newInstance()
     super.beforeAll()
   }
 
   override def afterAll() = {
-    //Reset optimizelocal after all tests
-    remote.asInstanceOf[NettyRemoteSupport].optimizeLocal.set(optimizedLocals)
-    remote.shutdown()
-    // todo is it really necessary to shutdown registy to?
-    registry.shutdownAll()
+    nodeA.loadClass(classOf[NodeA_Stop].getName).newInstance()
+    remote.shutdownClientModule()
+    remote.shutdownServerModule()
     super.afterAll()
   }
 
 }
 
+class NodeA_Start {
+  println("NodeA start")
+  remote.start(RclSpecSettings.host, RclSpecSettings.port)
+  remote.register("test", actorOf[EchoActor])
+  remote.register("message-order-test", actorOf(new MessageOrderTestActor(RclSpecSettings.maxNumberToSend)))
+}
+
+class NodeA_Stop {
+  println("NodeA stop")
+  remote.shutdown()
+  registry.shutdownAll()
+  remote.shutdownClientModule()
+  remote.shutdownServerModule()
+}
+
 object MessageOrderTestConstants {
-    val X = -1
-    val isOutOfOrder = 0
+  val X = -1
+  val isOutOfOrder = 0
 }
 
 /**
@@ -130,17 +199,17 @@ object MessageOrderTestConstants {
  *
  * The X represents a message who will fail with Class not found exception and the whole RCL thing will happen.
  */
-class MessageOrderTestActor(val maxNumberToSend:Int) extends Actor {
+class MessageOrderTestActor(val maxNumberToSend: Int) extends Actor {
 
   assert(maxNumberToSend >= 0, "N must be non-negative")
 
-  @volatile var expecting:Int = MessageOrderTestConstants.X
+  @volatile var expecting: Int = MessageOrderTestConstants.X
   @volatile var outOfOrder = false
 
   def receive = {
     case MessageOrderTestConstants.isOutOfOrder => self.reply(outOfOrder)
-    case i:Int if expecting == i => if (expecting == maxNumberToSend) expecting = MessageOrderTestConstants.X else expecting += 1;
-    case ref:AnyRef if expecting == MessageOrderTestConstants.X => expecting = 1
+    case i: Int if expecting == i => if (expecting == maxNumberToSend) expecting = MessageOrderTestConstants.X else expecting += 1;
+    case ref: AnyRef if expecting == MessageOrderTestConstants.X => expecting = 1
     case _ => outOfOrder = true
   }
 }
@@ -150,7 +219,8 @@ class EchoActor extends Actor {
     case "PING" => {
       self.reply("PONG")
     }
-    case ref:AnyRef => {
+    case ref: AnyRef => {
+      println("Actor received " + ref.getClass.getName)
       self.reply(ref)
     }
     case _ => // discard unknown

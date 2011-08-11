@@ -70,7 +70,7 @@ object MessageSerializer {
     builder.setMessageManifest(ByteString.copyFromUtf8(serializable.getClass.getName))
   }
 
-  private def box(value: Any): AnyRef = value match {
+  def box(value: Any): AnyRef = value match {
     case value: Boolean ⇒ new java.lang.Boolean(value)
     case value: Char    ⇒ new java.lang.Character(value)
     case value: Short   ⇒ new java.lang.Short(value)
@@ -82,7 +82,7 @@ object MessageSerializer {
     case value          ⇒ value.asInstanceOf[AnyRef]
   }
 
-  private def unbox(value: AnyRef): Any = value match {
+  def unbox(value: AnyRef): Any = value match {
     case value: java.lang.Boolean   ⇒ value.booleanValue
     case value: java.lang.Character ⇒ value.charValue
     case value: java.lang.Short     ⇒ value.shortValue

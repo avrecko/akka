@@ -6,7 +6,6 @@ package akka.remote.netty
 
 import akka.dispatch.{ ActorCompletableFuture, DefaultCompletableFuture, CompletableFuture, Future }
 import akka.remote.{ MessageSerializer, RemoteClientSettings, RemoteServerSettings }
-import akka.remote.protocol.RemoteProtocol._
 import akka.remote.protocol.RemoteProtocol.ActorType._
 import akka.serialization.RemoteActorSerialization
 import akka.serialization.RemoteActorSerialization._
@@ -54,7 +53,10 @@ import java.util.concurrent.atomic.{ AtomicReference, AtomicBoolean }
 import java.util.concurrent._
 import akka.AkkaException
 import java.util.Queue
-import akka.remote.rcl.RemoteClassLoading
+import akka.remote.protocol.RemoteProtocol._
+import com.google.protobuf.ExtensionRegistry
+import akka.remote.protocol.RemoteProtocol
+import akka.remote.rcl.{RetryWillBeAttemptedException, RemoteClassLoadingSupport, RemoteClassLoading}
 
 class RemoteClientMessageBufferException(message: String, cause: Throwable = null) extends AkkaException(message, cause)
 
@@ -208,15 +210,12 @@ abstract class RemoteClient private[akka] (
   /**
    * Returns an array with the current pending messages not yet delivered.
    */
-
-
-
-
   def pendingMessages: Array[Any] = {
     var messages = Vector[Any]()
     val iter = resendMessageQueue.iterator
     while (iter.hasNext) {
-      messages = messages :+ deserialize(iter.next.getMessage)
+      // todo fix this do we REALLY need to deserialize?
+//      messages = messages :+ deserialize(iter.next.getMessage)
     }
     messages.toArray
   }
@@ -275,7 +274,7 @@ abstract class RemoteClient private[akka] (
       val resultFuture = if (request.getOneWay) {
         if (itIsOkToTryToWriteMessage) { //Only attempt write if message wasn't appended to pending
           try {
-            val future = currentChannel.write(encode(request))
+            val future = currentChannel.write(RemoteEncoder.encode(request))
             future.awaitUninterruptibly()
             if (!future.isCancelled && !future.isSuccess) {
               notifyListeners(RemoteClientWriteFailed(request, future.getCause, module, remoteAddress))
@@ -315,7 +314,7 @@ abstract class RemoteClient private[akka] (
           var future: ChannelFuture = null
           try {
             // try to send the original one
-            future = currentChannel.write(encode(request))
+            future = currentChannel.write(RemoteEncoder.encode(request))
             future.awaitUninterruptibly()
             if (future.isCancelled) futures.remove(futureUuid) // Clean up future
             else if (!future.isSuccess) handleRequestReplyError(future)
@@ -354,7 +353,7 @@ abstract class RemoteClient private[akka] (
             case None      ⇒ Some(new DefaultChannelFuture(currentChannel, true))
           }
           try {
-            currentChannel.write(encode(pending)).addListener(new SendPendingMessageListener(pending, newSignal))
+            currentChannel.write(RemoteEncoder.encode(pending)).addListener(new SendPendingMessageListener(pending, newSignal))
           } catch {
             case e ⇒
               resendMessageQueueLock.tryUnlock() //Clean up
@@ -399,11 +398,6 @@ abstract class RemoteClient private[akka] (
     if (!actorRef.supervisor.isDefined) throw new IllegalActorStateException(
       "Can't unregister supervisor for " + actorRef + " since it is not under supervision")
     else supervisors.remove(actorRef.supervisor.get.uuid)
-
-
-  def deserialize(protocol: MessageProtocol):Any = MessageSerializer.deserialize(protocol, loader)
-
-  def encode(protocol: RemoteMessageProtocol): AkkaRemoteProtocol = RemoteEncoder.encode(protocol)
 }
 
 /**
@@ -508,13 +502,39 @@ class ActiveRemoteClient private[akka] (
 class RemoteClassLoadingActiveRemoteClient(module: NettyRemoteClientModule, remoteAddress: InetSocketAddress,
   loader: Option[ClassLoader] = None, notifyListenersFun: (⇒ Any) ⇒ Unit) extends ActiveRemoteClient(module, remoteAddress, loader, notifyListenersFun){
 
-  override def deserialize(protocol: MessageProtocol) = {
+  val rclSupport = new RemoteClassLoadingSupport(loader)
 
+  override def send[T](
+    message: Any,
+    senderOption: Option[ActorRef],
+    senderFuture: Option[CompletableFuture[T]],
+    remoteAddress: InetSocketAddress,
+    timeout: Long,
+    isOneWay: Boolean,
+    actorRef: ActorRef,
+    typedActorInfo: Option[Tuple2[String, String]],
+    actorType: AkkaActorType): Option[CompletableFuture[T]] = {
+
+    val rmpBuilder = createRemoteMessageProtocolBuilder(
+      Some(actorRef),
+      Left(actorRef.uuid),
+      actorRef.id,
+      actorRef.actorClassName,
+      timeout,
+      Right(message),
+      isOneWay,
+      senderOption,
+      typedActorInfo,
+      actorType,
+      RemoteClientSettings.SECURE_COOKIE)
+
+    rclSupport.getRclIdForInstance(message) match {
+      case null => // nothing to do
+      case id => rmpBuilder.getMessageBuilder.setRclId(id)
+    }
+    send(rmpBuilder.build, senderFuture)
   }
 
-  override def encode(protocol: RemoteMessageProtocol) = {
-    null
-  }
 }
 
 
@@ -534,14 +554,16 @@ class ActiveRemoteClientPipelineFactory(
     val timeout = new ReadTimeoutHandler(timer, RemoteClientSettings.READ_TIMEOUT.length, RemoteClientSettings.READ_TIMEOUT.unit)
     val lenDec = new LengthFieldBasedFrameDecoder(RemoteClientSettings.MESSAGE_FRAME_SIZE, 0, 4, 0, 4)
     val lenPrep = new LengthFieldPrepender(4)
-    val protobufDec = new ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance)
+    val registry = ExtensionRegistry.newInstance()
+    RemoteProtocol.registerAllExtensions(registry)
+    val protobufDec = new ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance, registry)
     val protobufEnc = new ProtobufEncoder
     val (enc, dec) = RemoteServerSettings.COMPRESSION_SCHEME match {
       case "zlib" ⇒ (new ZlibEncoder(RemoteServerSettings.ZLIB_COMPRESSION_LEVEL) :: Nil, new ZlibDecoder :: Nil)
       case _      ⇒ (Nil, Nil)
     }
 
-    val remoteClient = new ActiveRemoteClientHandler(name, futures, supervisors, bootstrap, remoteAddress, timer, client)
+    val remoteClient = if(RemoteClassLoading.enabled) new RemoteClassLoadingActiveRemoteClientHandler(name, futures, supervisors, bootstrap, remoteAddress, timer, client.asInstanceOf[RemoteClassLoadingActiveRemoteClient]) else new ActiveRemoteClientHandler(name, futures, supervisors, bootstrap, remoteAddress, timer, client)
     val stages: List[ChannelHandler] = timeout :: dec ::: lenDec :: protobufDec :: enc ::: lenPrep :: protobufEnc :: remoteClient :: Nil
     new StaticChannelPipeline(stages: _*)
   }
@@ -578,7 +600,16 @@ class ActiveRemoteClientHandler(
 
             case future ⇒
               if (reply.hasMessage) {
-                val message = client.deserialize(reply.getMessage)
+                var message:Any = null
+                try {
+                  message = deserialize(reply.getMessage, ctx, event)
+                } catch {
+                  case retry:RetryWillBeAttemptedException => {
+                    // add it again ;) RCL will attmept this again
+                    futures.put(replyUuid, future)
+                    return
+                  }
+                }
                 future.completeWithResult(message)
               } else {
                 val exception = parseException(reply, client.loader)
@@ -662,6 +693,35 @@ class ActiveRemoteClientHandler(
         CannotInstantiateRemoteExceptionDueToRemoteProtocolParsingErrorException(problem, classname, exception.getMessage)
     }
   }
+
+  def deserialize(protocol: MessageProtocol, ctx: ChannelHandlerContext, event: MessageEvent) = {
+     MessageSerializer.deserialize(protocol, client.loader)
+  }
+
+}
+
+@ChannelHandler.Sharable
+class RemoteClassLoadingActiveRemoteClientHandler(
+  name: String,
+  futures: ConcurrentMap[Uuid, CompletableFuture[_]],
+  supervisors: ConcurrentMap[Uuid, ActorRef],
+  bootstrap: ClientBootstrap,
+  remoteAddress: InetSocketAddress,
+  timer: HashedWheelTimer,
+  client: RemoteClassLoadingActiveRemoteClient)
+  extends ActiveRemoteClientHandler(name, futures,supervisors,bootstrap,remoteAddress,timer,client) {
+
+  val rclSupport = new RemoteClassLoadingSupport(client.loader)
+
+  override def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent) = {
+    EventHandler.info(this,"RclArc received at "  + System.nanoTime() + " - " + event.getMessage)
+    rclSupport.messageReceived(ctx, event, super.messageReceived _)
+  }
+
+  override def deserialize(protocol: MessageProtocol, ctx: ChannelHandlerContext, event: MessageEvent) = {
+     rclSupport.deserialize(protocol, event)
+  }
+
 }
 
 /**
@@ -930,7 +990,9 @@ class RemoteServerPipelineFactory(
   def getPipeline: ChannelPipeline = {
     val lenDec = new LengthFieldBasedFrameDecoder(MESSAGE_FRAME_SIZE, 0, 4, 0, 4)
     val lenPrep = new LengthFieldPrepender(4)
-    val protobufDec = new ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance)
+    val registry = ExtensionRegistry.newInstance()
+    RemoteProtocol.registerAllExtensions(registry)
+    val protobufDec = new ProtobufDecoder(AkkaRemoteProtocol.getDefaultInstance, registry)
     val protobufEnc = new ProtobufEncoder
     val (enc, dec) = COMPRESSION_SCHEME match {
       case "zlib" ⇒ (new ZlibEncoder(ZLIB_COMPRESSION_LEVEL) :: Nil, new ZlibDecoder :: Nil)
@@ -1026,7 +1088,7 @@ class RemoteServerHandler(
     case remoteProtocol: AkkaRemoteProtocol if remoteProtocol.hasMessage ⇒
       val requestProtocol = remoteProtocol.getMessage
       if (REQUIRE_COOKIE) authenticateRemoteClient(requestProtocol, ctx)
-      handleRemoteMessageProtocol(requestProtocol, event.getChannel)
+      handleRemoteMessageProtocol(requestProtocol, event.getChannel, event)
     case _ ⇒ //ignore
   }
 
@@ -1041,21 +1103,26 @@ class RemoteServerHandler(
       case _                       ⇒ None
     }
 
-  private def handleRemoteMessageProtocol(request: RemoteMessageProtocol, channel: Channel) = try {
+  private def handleRemoteMessageProtocol(request: RemoteMessageProtocol, channel: Channel, event:MessageEvent) = {
+    EventHandler.info(this,"RS received at "  + System.nanoTime() + " - " + event.getMessage)
+
+
+    try {
+    val deserializedMessage = deserialize(request.getMessage, event) // make sure we can deserialize before continuing
     request.getActorInfo.getActorType match {
-      case SCALA_ACTOR ⇒ dispatchToActor(request, channel)
-      case TYPED_ACTOR ⇒ dispatchToTypedActor(request, channel)
+      case SCALA_ACTOR ⇒ dispatchToActor(request, channel, deserializedMessage)
+      case TYPED_ACTOR ⇒ dispatchToTypedActor(request, channel, deserializedMessage)
       case JAVA_ACTOR  ⇒ throw new IllegalActorStateException("ActorType JAVA_ACTOR is currently not supported")
       case other       ⇒ throw new IllegalActorStateException("Unknown ActorType [" + other + "]")
     }
   } catch {
+    case retry:RetryWillBeAttemptedException => // silently ignore
     case e: Exception ⇒
       server.notifyListeners(RemoteServerError(e, server))
       EventHandler.error(e, this, e.getMessage)
-  }
+  }  }
 
-
-  private def dispatchToActor(request: RemoteMessageProtocol, channel: Channel) {
+  private def dispatchToActor(request: RemoteMessageProtocol, channel: Channel, message:Any) {
     val actorInfo = request.getActorInfo
 
     val actorRef =
@@ -1067,7 +1134,6 @@ class RemoteServerHandler(
           return
       }
 
-    val message = deserialize(request.getMessage)
     val sender =
       if (request.hasSender) Some(RemoteActorSerialization.fromProtobufToRemoteActorRef(request.getSender, applicationLoader))
       else None
@@ -1103,13 +1169,13 @@ class RemoteServerHandler(
 
                 // FIXME lift in the supervisor uuid management into toh createRemoteMessageProtocolBuilder method
                 if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
-
-                write(channel, encode(messageBuilder.build))
+                enhanceMessage(messageBuilder, r.right.get)
+                write(channel, RemoteEncoder.encode(messageBuilder.build))
             }))
     }
   }
 
-  private def dispatchToTypedActor(request: RemoteMessageProtocol, channel: Channel) = {
+  private def dispatchToTypedActor(request: RemoteMessageProtocol, channel: Channel, message:Any) = {
     val actorInfo = request.getActorInfo
     val typedActorInfo = actorInfo.getTypedActorInfo
 
@@ -1145,7 +1211,7 @@ class RemoteServerHandler(
       targetMethod
     }
 
-    deserialize(request.getMessage) match {
+    message match {
       case RemoteActorSystemMessage.Stop ⇒
         if (UNTRUSTED_MODE) throw new SecurityException("Remote server is operating is untrusted mode, can not stop the actor")
         else TypedActor.poisonPill(typedActor) //TODO stop may block, but it might be better to do spawn { typedActor.stop() }
@@ -1171,8 +1237,8 @@ class RemoteServerHandler(
                 AkkaActorType.TypedActor,
                 None)
               if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
-
-              write(channel, encode(messageBuilder.build))
+              enhanceMessage(messageBuilder, if(result.isLeft) result.left.get else result.right.get)
+              write(channel,  RemoteEncoder.encode(messageBuilder.build))
             } catch {
               case e: Exception ⇒
                 EventHandler.error(e, this, e.getMessage)
@@ -1359,7 +1425,8 @@ class RemoteServerHandler(
       actorType,
       None)
     if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
-    encode(messageBuilder.build)
+    enhanceMessage(messageBuilder, exception)
+    RemoteEncoder.encode(messageBuilder.build)
   }
 
   private def authenticateRemoteClient(request: RemoteMessageProtocol, ctx: ChannelHandlerContext) = {
@@ -1378,28 +1445,35 @@ class RemoteServerHandler(
 
   protected def parseUuid(protocol: UuidProtocol): Uuid = uuidFrom(protocol.getHigh, protocol.getLow)
 
-  def encode(rmp: RemoteMessageProtocol): AkkaRemoteProtocol = RemoteEncoder.encode(rmp)
+  def enhanceMessage(builder: RemoteMessageProtocol.Builder, value: Any) = {} // no-op for non RCL
 
-  def deserialize(protocol: MessageProtocol) = MessageSerializer.deserialize(protocol, applicationLoader)
+  def deserialize(protocol: MessageProtocol, event: MessageEvent):Any = MessageSerializer.deserialize(protocol, applicationLoader)
 
 }
 
 class RemoteClassLoadingServerHandler(name: String,
                                       openChannels: ChannelGroup,
                                       applicationLoader: Option[ClassLoader],
-                                      server: NettyRemoteServerModule) extends RemoteServerHandler(name, openChannels,applicationLoader,server){
+                                      server: NettyRemoteServerModule) extends RemoteServerHandler(name, openChannels,applicationLoader,server) {
 
-  override def encode(rmp: RemoteMessageProtocol): AkkaRemoteProtocol = {
-    println("Remote Class Loading Encoding")
-    val arp = AkkaRemoteProtocol.newBuilder
-    arp.setMessage(rmp)
-    arp.build
+  val rclSupport = new RemoteClassLoadingSupport(applicationLoader)
+
+  override def enhanceMessage(builder: RemoteMessageProtocol.Builder, instance: Any) = {
+    rclSupport.getRclIdForInstance(instance) match {
+      case null => // nothing to do
+      case id =>  builder.getMessageBuilder.setRclId(id)
+    }
   }
 
-  override def deserialize(protocol: MessageProtocol) = {
-     MessageSerializer.deserialize(protocol, applicationLoader)
+  override def deserialize(protocol: MessageProtocol, event:MessageEvent) = {
+    println("Deserialize called")
+    rclSupport.deserialize(protocol, event)
   }
 
+  override def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent):Unit = {
+    EventHandler.info(this,"RCL RS received at "  + System.nanoTime() + " - " + event.getMessage)
+    rclSupport.messageReceived(ctx, event, super.messageReceived _)
+  }
 }
 
 class DefaultDisposableChannelGroup(name: String) extends DefaultChannelGroup(name) {

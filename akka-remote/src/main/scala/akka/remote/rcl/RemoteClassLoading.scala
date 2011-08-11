@@ -1,6 +1,5 @@
 package akka.remote.rcl
 
-import com.google.protobuf.ByteString
 import akka.remote.netty.RemoteEncoder
 import java.util.concurrent.ConcurrentMap
 import com.google.common.base.Function
@@ -8,20 +7,24 @@ import akka.config.Config
 import com.google.common.io.ByteStreams
 import akka.remote.MessageSerializer
 import akka.remote.protocol.RemoteProtocol._
-import com.eaio.uuid.UUID
 import collection.JavaConversions._
-import java.lang.ClassNotFoundException
-import org.jboss.netty.channel._
-import java.util.LinkedList
 import com.google.common.collect.{Lists, Multimaps, LinkedListMultimap, MapMaker}
+import akka.remote.util.UUID_
+import akka.event.EventHandler
+import java.lang.{Long, ClassNotFoundException}
+import java.util.{List, LinkedList}
+import akka.remote.protocol.RemoteProtocol
+import com.eaio.uuid.UUID
+import org.jboss.netty.channel._
+import com.google.protobuf.{ExtensionRegistry, ByteString}
 
 /**
  * Implementation of the Remote Class Loading functionality.
  */
-
 object RemoteClassLoading {
 
-//  val enabled = Config.config.getBoolean("akka.remote.remote-class-loading.enabled", true)
+
+  //  val enabled = Config.config.getBoolean("akka.remote.remote-class-loading.enabled", true)
   val enabled = true
 
   // SENDER STUFF
@@ -32,8 +35,8 @@ object RemoteClassLoading {
       endpoint
     }
   })
-  val endpointByUuid: ConcurrentMap[UUID, RemoteClassLoaderEndpoint] = new MapMaker().concurrencyLevel(4).weakValues().makeMap[UUID, RemoteClassLoaderEndpoint]()
 
+  val endpointByUuid: ConcurrentMap[UUID, RemoteClassLoaderEndpoint] = new MapMaker().concurrencyLevel(4).weakValues().makeMap[UUID, RemoteClassLoaderEndpoint]()
 
   // RECEIVER STUFF
   // todo how to expire this stuff?
@@ -42,34 +45,181 @@ object RemoteClassLoading {
   })
 
   // GLOBAL
-  val classCache: ConcurrentMap[(String, UUID), Array[Byte]] = new MapMaker().concurrencyLevel(4).makeMap[(String, UUID), Array[Byte]]()
+  val classCache: ConcurrentMap[(UUID,String), Array[Byte]] = new MapMaker().concurrencyLevel(4).makeMap[(UUID, String), Array[Byte]]()
+  val blacklisted: ConcurrentMap[(UUID,String), Boolean] = new MapMaker().concurrencyLevel(4).makeMap[(UUID, String), Boolean]()
 
-  // UTILITIES
-  def fromUuidProto(uuid: UuidProtocol) = new UUID(uuid.getHigh, uuid.getLow)
+}
 
-  def toUuidProto(uuid: UUID) = UuidProtocol.newBuilder().setHigh(uuid.getTime).setLow(uuid.getClockSeqAndNode).build()
+class RetryWillBeAttemptedException extends RuntimeException
 
-  def getClassLoaderForDeserialization(cl: Option[ClassLoader], mp: MessageProtocol): Option[ClassLoader] = {
-    if (!mp.hasRclId) {
-      cl
+class RemoteClassLoadingSupport(val clientCl: Option[ClassLoader]) {
+
+  // when RCL is happening any additional messages should wait until the rcl is completed
+  val pendingRclClass = new ChannelLocal[(UUID, String)]
+  val pendingMessages = new ChannelLocal[LinkedList[MessageEvent]] {
+    override def initialValue(channel: Channel) = Lists.newLinkedList()
+  }
+
+  def handleBcreq(handlerContext: ChannelHandlerContext, event:MessageEvent, arp: AkkaRemoteProtocol){
+    if(!arp.getInstruction.hasExtension(RemoteProtocol.bcreq)){
+      EventHandler.warning(this, "Corrupt rcl request headers. Possible bug or you are doing something ungodly with the message.")
+      return
     }
-    if (RemoteClassLoading.enabled) {
-      val uuid = RemoteClassLoading.fromUuidProto(mp.getRclId)
-      val endpoint = RemoteClassLoading.endpointByUuid.get(uuid)
-      val rcl = if (endpoint != null) endpoint.cl else  RemoteClassLoading.rclsByUuid.get(uuid)
-      if (cl != None) {
-        Option(new DualParentClassLoader(cl.get, rcl))
-      } else {
-        Option(rcl)
+    val bcreq = arp.getInstruction.getExtension(RemoteProtocol.bcreq)
+
+    val uuidProto = bcreq.getRclId
+    val uuid = UUID_.toUuid(uuidProto)
+    val fqn = bcreq.getFqn
+
+    val endpoint = RemoteClassLoading.endpointByUuid.get(uuid)
+
+    if (endpoint == null) {
+      EventHandler.info(this, "ByteCodeRequest's enpoint is not available. Maybe the node got restarted?")
+      replyWithBcresp(uuidProto, fqn, ByteCodeResponseCode.ENDPOINT_NOT_AVAILABLE, null, event)
+      return
+    }
+
+    try {
+      replyWithBcresp(uuidProto, fqn, ByteCodeResponseCode.OK, endpoint.getByteCode(fqn), event)
+    } catch {
+      case _ => {
+        EventHandler.info(this, "Failed to find bytecode for (" + uuid + ", " + fqn)
+        replyWithBcresp(uuidProto, fqn, ByteCodeResponseCode.BYTE_CODE_NOT_AVAILABLE, null, event)
       }
-    } else {
-      cl
     }
+  }
+
+   def replyWithBcresp(uuid:UuidProtocol, fqn:String, code: ByteCodeResponseCode, bytecode: Array[Byte], event:MessageEvent){
+    val arp = AkkaRemoteProtocol.newBuilder()
+    arp.getInstructionBuilder.setCommandType(CommandType.BYTE_CODE_RESPONSE)
+    val bcresp = ByteCodeResponseProtocol.newBuilder().setRclId(uuid).setFqn(fqn).setResponseCode(code)
+    if(bytecode != null) bcresp.setBytecode(ByteString.copyFrom(bytecode))
+    arp.getInstructionBuilder.setExtension(RemoteProtocol.bcresp , bcresp.build)
+    event.getChannel.write(arp.build()) // todo retry 3 times then give up
+  }
+
+
+  def handleBcresp(ctx: ChannelHandlerContext, event:ChannelEvent, arp: AkkaRemoteProtocol, fun:(ChannelHandlerContext, MessageEvent) => Any){
+    if (!arp.getInstruction.hasExtension(RemoteProtocol.bcresp)) {
+      EventHandler.warning(this, "Corrupt rcl response headers. Possible bug or you are doing something ungodly with the message.")
+      return
+    }
+
+    val bcresp = arp.getInstruction.getExtension(RemoteProtocol.bcresp)
+
+    val uuidProto = bcresp.getRclId
+    val uuid = UUID_.toUuid(uuidProto)
+    val fqn = bcresp.getFqn
+
+    val responseCode = bcresp.getResponseCode
+
+    if (responseCode == ByteCodeResponseCode.OK){
+      if (!bcresp.hasBytecode){
+        EventHandler.error(this, "Bug in akka remote class loadig. Response code was OK but bytecode is not available.")
+        return
+      }
+      RemoteClassLoading.classCache.put((uuid,fqn), bcresp.getBytecode.toByteArray)
+    } else {
+      // failed to get the bytecode lets blacklist this
+      EventHandler.info(this, "Black listing (" + uuid + ", " + fqn +") since the response is " + responseCode.name())
+      RemoteClassLoading.blacklisted.put((uuid,fqn), true)
+    }
+
+    // I don't think it is possible that we get a response for a different class than we requested but just in case
+    if (!pendingRclClass.get(event.getChannel).equals((uuid, fqn))) {
+      EventHandler.warning(this, "Possible bug in akka remote class loading. Received bytecode response for a different class than expected.")
+      return
+    }
+
+    // we can _assume_ that no concurrent request will come to this channel until we are finished processing
+    // todo verify this assumption
+
+    pendingRclClass.remove(event.getChannel)
+
+    val pending = pendingMessages.remove(event.getChannel) // todo make sure initialValue is read again after we remove this
+
+    // just replay all the messages agains the parent handler it doesn't really matter what the response code was
+    // todo maybe this can be improved but it gets pretty messy if we try to "fast copy" the remaining messages
+
+    pending.foreach(fun(ctx,_))
+  }
+
+
+  def handleCnfe(rclId: UuidProtocol, fqn: String, event: MessageEvent) {
+    val channel = event.getChannel
+    pendingRclClass.set(channel, (UUID_.toUuid(rclId), fqn))
+    pendingMessages.get(channel).addLast(event)
+    val arp = AkkaRemoteProtocol.newBuilder()
+    val builder = arp.getInstructionBuilder
+    builder.setCommandType(CommandType.BYTE_CODE_REQUEST)
+    builder.setExtension(RemoteProtocol.bcreq, ByteCodeRequestProtocol.newBuilder().setRclId(rclId).setFqn(fqn).build()).build()
+    channel.write(arp.build()) // todo retry on error 3 times
+    // todo add timer as we should give up after some time if we don't receive a reply
+    throw new RetryWillBeAttemptedException
+  }
+
+  def handleMessage(ctx: ChannelHandlerContext, event: MessageEvent, fun:(ChannelHandlerContext, MessageEvent) => Any) {
+     // if we are not waiting for bcresp then continue other-wize add to the list
+    if(pendingRclClass.get(event.getChannel) == null){
+       fun(ctx, event)
+    }  else {
+       pendingMessages.get(event.getChannel).add(event)
+    }
+  }
+
+
+  def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent, fun:(ChannelHandlerContext, MessageEvent) => Any) {
+      event.getMessage match {
+        case arp: AkkaRemoteProtocol if arp.hasInstruction && arp.getInstruction.getCommandType == CommandType.BYTE_CODE_REQUEST => handleBcreq(ctx, event, arp)
+        case arp: AkkaRemoteProtocol if arp.hasInstruction && arp.getInstruction.getCommandType == CommandType.BYTE_CODE_RESPONSE => handleBcresp(ctx, event, arp, fun)
+        case arp: AkkaRemoteProtocol if arp.hasMessage => handleMessage(ctx, event, fun)
+        case _ => fun(ctx,event)
+      }
+  }
+
+  def getRclIdForInstance(instance: Any) = {
+    val ref = MessageSerializer.box(instance)
+    ref.getClass.getClassLoader match {
+      case rcl:RemoteClassLoader => rcl._idCached
+      case cl: ClassLoader => RemoteClassLoading.endpointByCl.get(cl)._idCached
+      case null => null
+    }
+  }
+
+  def getRclForDeserialization(rclId: UuidProtocol):ClassLoader = {
+    val uuid = UUID_.toUuid(rclId)
+    // try to get the endpoint first if it exists
+    val uuid1 = RemoteClassLoading.endpointByUuid
+    uuid1.get(uuid) match {
+      case ep: RemoteClassLoaderEndpoint => ep.cl
+      case _ => RemoteClassLoading.rclsByUuid.get(uuid)
+    }
+  }
+
+
+
+  def deserialize(protocol: MessageProtocol, event:MessageEvent):Any = {
+    println("Deserilaizeee")
+     try {
+       deserialize(protocol)
+     } catch {
+       case cnfe:ClassNotFoundException => handleCnfe(protocol.getRclId, cnfe.getMessage, event)
+       case t:Throwable => throw t
+     }
+  }
+
+  private def deserialize(protocol: MessageProtocol):Any = protocol.hasRclId match {
+    case true => clientCl match {
+      // if we have user set ClassLoader use that first other-wize use rcl only rcl CL
+      case Some(cl) => MessageSerializer.deserialize(protocol, Option(new DualClassLoader(cl, getRclForDeserialization(protocol.getRclId))))
+      case None => MessageSerializer.deserialize(protocol, Option(getRclForDeserialization(protocol.getRclId)))
+    }
+    case false => MessageSerializer.deserialize(protocol, clientCl)
   }
 
 }
 
-case class ByteCodeNotAvailableException(fqn:String, rcl:UUID) extends RuntimeException
+case class ByteCodeNotAvailableException(fqn: String, rcl: UUID) extends RuntimeException
 
 /**
  * The sole purpose of this class is the provide Identity for the ClassLoader instance and Extract ByteCode from it.
@@ -78,7 +228,7 @@ class RemoteClassLoaderEndpoint(val cl: ClassLoader) {
 
   val id = new UUID
 
-  val _idCached = RemoteClassLoading.toUuidProto(id)
+  val _idCached = UUID_.toProto(id)
 
   def getByteCode(fqn: String): Array[Byte] = {
     // todo this will be improved with some elaborate hooks into more complex classlaoders such as WebSphere CL and similar
@@ -91,9 +241,11 @@ class RemoteClassLoaderEndpoint(val cl: ClassLoader) {
 
 }
 
+object BlackListedClassException extends RuntimeException
+
 class RemoteClassLoader(val id: UUID) extends ClassLoader(null) {
 
-  val _idCached = RemoteClassLoading.toUuidProto(id)
+  val _idCached = UUID_.toProto(id)
 
   // we are delegation style class loader caching and stuff like synhronization is handled by loadClass method
   override def findClass(fqn: String): Class[_] = {
@@ -106,53 +258,59 @@ class RemoteClassLoader(val id: UUID) extends ClassLoader(null) {
       case _ => // silently ignore
     }
     // next try to use the Thread Context ClassLoader
-   try {
-     return Thread.currentThread().getContextClassLoader.loadClass(fqn)
-   } catch {
-     case _ => // silently ignore
-   }
+    try {
+      return Thread.currentThread().getContextClassLoader.loadClass(fqn)
+    } catch {
+      case _ => // silently ignore
+    }
+
+    // make sure this class is not blacklisted
+    if (RemoteClassLoading.blacklisted.containsKey((id, fqn))) {
+      EventHandler.info(this, "Class(" + id + ", " + fqn + ") is blacklisted remote class loading will not be retried.")
+      throw BlackListedClassException
+    }
 
     // next use the remote class loading to get the bytecode
     // we assume it is loaded in the classCache if it is not the called handle the CNFE specially and make it available
-    RemoteClassLoading.classCache.get((fqn, id)) match {
+    RemoteClassLoading.classCache.get((id, fqn)) match {
       case bytecode: Array[Byte] => defineClass(fqn, bytecode, id)
       case _ => throw new ClassNotFoundException(fqn)
     }
   }
 
 
-  def defineClass(fqn: String, bytecode: Array[Byte], rcl:UUID): Class[_] = {
+  def defineClass(fqn: String, bytecode: Array[Byte], rcl: UUID): Class[_] = {
     try {
       val clazz = defineClass(fqn, bytecode, 0, bytecode.length)
       // linking the class
       resolveClass(clazz)
       // we can safely remove the class from the classCache
-      RemoteClassLoading.classCache.remove((fqn,rcl))
+      RemoteClassLoading.classCache.remove((rcl, fqn))
       clazz
     }
     catch {
       // define will call findClass (throwing CNFE) but the method will instead throw the NCDFE
-      case ncdfe:NoClassDefFoundError => throw new ClassNotFoundException(ncdfe.getMessage.replace('/','.'))
-      case t:Throwable => throw t // we can get ClassFormatError or SecurityException or X
+      case ncdfe: NoClassDefFoundError => throw new ClassNotFoundException(ncdfe.getMessage.replace('/', '.'))
+      case t: Throwable => throw t // we can get ClassFormatError or SecurityException or X
     }
 
   }
 
 }
 
-//todo figure a better way if possible
-class DualParentClassLoader(val p1: ClassLoader, val p2: ClassLoader) extends ClassLoader {
-
-  override def findClass(fqn: String): Class[_] = {
+/**
+ * First tries to get the stuff from A class loader if it fails it tries then from B
+ */
+class DualClassLoader(a:ClassLoader, b:ClassLoader) extends ClassLoader {
+  override def findClass(fqn: String) = {
     try {
-      return p1.loadClass(fqn)
+      a.loadClass(fqn)
     }
     catch {
       case _ => // silently ignore
     }
-
     try {
-      return p2.loadClass(fqn)
+      b.loadClass(fqn)
     }
     catch {
       case _ => // silently ignore
@@ -162,126 +320,5 @@ class DualParentClassLoader(val p1: ClassLoader, val p2: ClassLoader) extends Cl
   }
 }
 
-/**
- * Installed just before the RemoteServer/ActiveRemoteClient and handles the loading of classes.
- */
-class RemoteClassLoadingUpStreamHandler(val name: String) extends SimpleChannelUpstreamHandler {
-
-  val pendingRclClass = new ChannelLocal[(String, UUID)]
-  val pendingMessages = new ChannelLocal[LinkedList[MessageEvent]]{
-    override def initialValue(channel: Channel) = Lists.newLinkedList()
-  }
-
-  override def channelOpen(ctx: ChannelHandlerContext, e: ChannelStateEvent) {
-    // todo expire rcl cache on channel close
-    super.channelOpen(ctx, e)
-  }
-
-  def handleBcreq(bcreq: ByteCodeRequestProtocol, ctx: ChannelHandlerContext, e: MessageEvent): Unit = {
-    val uuidProto = bcreq.getRclId
-    val uuid = RemoteClassLoading.fromUuidProto(bcreq.getRclId)
-    val endpoint = RemoteClassLoading.endpointByUuid.get(uuid)
-
-    val fqn = new String(bcreq.getFqn.toByteArray)
-
-    // just encode the bytecode
-    val bcrep = ByteCodeResponseProtocol.newBuilder().setFqn(bcreq.getFqn).setRequestingRclId(uuidProto)
-    try {
-      bcrep.setBytecode(ByteString.copyFrom(endpoint.getByteCode(fqn)))
-    } catch {
-      case _ => // silently ignore
-    }
-
-    e.getChannel.write(RemoteEncoder.encode(bcrep.build())).awaitUninterruptibly()
-    // todo should I wait uninterruptably?
-  }
-
-  def handleBcresp(bcresp: ByteCodeResponseProtocol, ctx: ChannelHandlerContext, e: MessageEvent): Unit = {
-    val fqn = new String(bcresp.getFqn.toByteArray)
-    val uuidProto = bcresp.getRequestingRclId
-    val uuid = RemoteClassLoading.fromUuidProto(bcresp.getRequestingRclId)
-    val bytecode = bcresp.getBytecode.toByteArray
-
-    RemoteClassLoading.classCache.put((fqn, uuid), bytecode)
-
-    // maybe unnecessary check?
-    if (pendingRclClass.get(e.getChannel) != (fqn -> uuid) ){
-      println("Received soemthng not expected")
-      return
-    }
-
-    pendingRclClass.remove(e.getChannel)
-    val pendingMessagsList = pendingMessages.get(e.getChannel)
-
-    while (!pendingMessagsList.isEmpty) {
-      val event = pendingMessagsList.removeFirst()
-      handleMessage(event.getMessage.asInstanceOf[AkkaRemoteProtocol], ctx,event,false)
-      if (pendingMessagsList.peekFirst() eq event){
-        return
-      }
-    }
-  }
-
-
-  def handleCnfe(fqn: String, uuid: UUID, uuidProto: UuidProtocol, ctx: ChannelHandlerContext, m: MessageEvent, addLast:Boolean): Unit = {
-    pendingRclClass.set(m.getChannel, (fqn, uuid))
-       if (addLast)
-        pendingMessages.get(m.getChannel).addLast(m)
-      else
-        pendingMessages.get(m.getChannel).addFirst(m)
-
-    val bcreq = ByteCodeRequestProtocol.newBuilder().setFqn(ByteString.copyFrom(fqn.getBytes)).setRclId(uuidProto).build()
-    m.getChannel.write(RemoteEncoder.encode(bcreq)).awaitUninterruptibly()
-//    m.getChannel.write(RemoteEncoder.encode(bcreq)).addListener(new ChannelFutureListener {
-//      def operationComplete(p1: ChannelFuture) {
-//        // todo if this fails 3 more times just forward all original events to super
-//        // todo make utility class that can retry
-//      }
-//    })
-  }
-
-  def handleMessage(arp: AkkaRemoteProtocol, ctx: ChannelHandlerContext, e: MessageEvent, addLast:Boolean): Unit = {
-    val channel = e.getChannel
-    // if we are waiting on bytecode response lets put the pending messages on a queue
-    if (pendingRclClass.get(channel) != null) {
-      if (addLast)
-        pendingMessages.get(channel).addLast(e)
-      else
-        pendingMessages.get(channel).addFirst(e)
-      return
-    }
-
-    // if there is no RCL Id attached we can proceeded no problem we assume it is a java. or scala. something stuff
-    val message = arp.getMessage.getMessage
-    if (!message.hasRclId) {
-      super.messageReceived(ctx,e)
-      return
-    }
-
-    val uuidProto = message.getRclId
-    val uuid = RemoteClassLoading.fromUuidProto(uuidProto)
-    // todo figure a better way this is actually good way if the next handler would take deserialized message
-    try {
-      MessageSerializer.deserialize(message, Some(RemoteClassLoading.rclsByUuid.get(uuid)))
-      // deserialize was success we can proceed no problem
-      super.messageReceived(ctx, e)
-    }
-    catch {
-      case cnfe: ClassNotFoundException => handleCnfe(cnfe.getMessage, uuid, uuidProto, ctx, e,addLast)
-      // todo it is possible to get other exceptions aswell
-    }
-  }
-
-  override def messageReceived(ctx: ChannelHandlerContext, e: MessageEvent) {
-    e.getMessage match {
-      case arp: AkkaRemoteProtocol if arp.hasBcreq => handleBcreq(arp.getBcreq, ctx, e)
-      case arp: AkkaRemoteProtocol if arp.hasBcresp => handleBcresp(arp.getBcresp, ctx, e)
-      case arp: AkkaRemoteProtocol if arp.hasMessage => handleMessage(arp, ctx, e, true)
-      case _ => super.messageReceived(ctx, e)
-    }
-  }
-
-
-}
 
 

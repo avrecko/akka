@@ -14,7 +14,6 @@ option optimize_for = SPEED;
 message AkkaRemoteProtocol {
   optional RemoteMessageProtocol message = 1;
   optional RemoteControlProtocol instruction = 2;
-  repeated MetadataEntryProtocol metadata = 3;
 }
 
 /**
@@ -28,8 +27,8 @@ message RemoteMessageProtocol {
   optional ExceptionProtocol exception = 5;
   optional UuidProtocol supervisorUuid = 6;
   optional RemoteActorRefProtocol sender = 7;
-  // repeated MetadataEntryProtocol metadata = 3; goes to AkkaRemoteProtocol
-  optional string cookie = 8;
+  repeated MetadataEntryProtocol metadata = 8;
+  optional string cookie = 9;
 }
 
 /**
@@ -38,6 +37,30 @@ message RemoteMessageProtocol {
 message RemoteControlProtocol {
   optional string cookie = 1;
   required CommandType commandType = 2;
+  extensions 1000 to max;
+}
+
+extend RemoteControlProtocol {
+  optional ByteCodeRequestProtocol bcreq = 1000;
+  optional ByteCodeResponseProtocol bcresp = 1001;
+}
+
+message ByteCodeRequestProtocol {
+  required UuidProtocol rclId = 1;
+  required string   fqn   = 2;
+}
+
+message ByteCodeResponseProtocol {
+  required UuidProtocol rclId = 1;
+  required string fqn   = 2;
+  required ByteCodeResponseCode responseCode = 3;
+  optional bytes bytecode = 4;
+}
+
+enum ByteCodeResponseCode {
+    OK = 1;
+    ENDPOINT_NOT_AVAILABLE = 2;
+    BYTE_CODE_NOT_AVAILABLE = 3;
 }
 
 /**
@@ -45,7 +68,11 @@ message RemoteControlProtocol {
  */
 enum CommandType {
   SHUTDOWN = 1;
+  BYTE_CODE_REQUEST = 2;
+  BYTE_CODE_RESPONSE = 3;
 }
+
+
 
 /**
  * Defines a remote ActorRef that "remembers" and uses its original Actor instance

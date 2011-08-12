@@ -337,7 +337,7 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     val arquillianJunit = Dependencies.arquillianJunit
 
     lazy val networkTestsEnabled = systemOptional[Boolean]("akka.test.network", false)
-    lazy val useTestConfig = systemOptional[String]("akka.config", "fobar")
+    lazy val useTestConfig = systemOptional[String]("akka.config", "foobar")
 
     override def testOptions = super.testOptions ++ {
       if (!networkTestsEnabled.value) Seq(TestFilter(test => !test.endsWith("NetworkTest")))

@@ -61,6 +61,7 @@ enum ByteCodeResponseCode {
     OK = 1;
     ENDPOINT_NOT_AVAILABLE = 2;
     BYTE_CODE_NOT_AVAILABLE = 3;
+    BYTE_CODE_REQUEST_TIMEOUT = 4;
 }
 
 /**

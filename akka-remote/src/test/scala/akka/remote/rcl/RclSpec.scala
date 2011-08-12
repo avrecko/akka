@@ -156,7 +156,13 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
     scenario("The user specified class loader must be respected by client and serverm") {
       pending
     }
+    scenario("Message sending fails it shoud be in the pending messages. The message is loaded via RCL") {
+      pending
+    }
 
+    scenario("If ByteCodeResponse is not received for some time we should give up permanently.") {
+      pending
+    }
 
   }
 
@@ -169,6 +175,8 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
     nodeA.loadClass(classOf[NodeA_Stop].getName).newInstance()
     remote.shutdownClientModule()
     remote.shutdownServerModule()
+    // todo shutdown RCL timer like this?
+    RemoteClassLoading.timer.cancel()
     super.afterAll()
   }
 

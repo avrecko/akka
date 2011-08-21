@@ -1,0 +1,24 @@
+<project default="main">
+
+    <macrodef name="uexec" description="Similar to exec but works for Unix and *cough* Windows OS.">
+        <attribute name="cmd" />
+        <attribute name="argline" />
+        <attribute name="dir" default="${basedir}" />
+          <sequential>
+            <exec osfamily="unix" executable="@{cmd}" failonerror="true" dir="@{dir}">
+                <arg line="@{argline}"/>
+            </exec>
+            <exec osfamily="windows" executable="cmd" failonerror="true" dir="@{dir}">
+                <arg value="/c"/>
+                <arg value="@{cmd}"/>
+                <arg value="@{argline}"/>
+            </exec>
+        </sequential>
+    </macrodef>
+
+    <target name="main">
+        <uexec cmd="sbt" argline="'project akka-remote' publish" dir="../"/>
+        <uexec cmd="mvn" argline="clean install -Dmaven.test.skip=true"/>
+        <uexec cmd="mvn" argline="test"/>
+    </target>
+</project>

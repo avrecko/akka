@@ -1,8 +1,8 @@
-Quite notes on Arquillian test by Alen Vrečko on 2011-08-22
+Quick notes on Arquillian test by Alen Vrečko on 2011-08-22
 
 To run integration tests:
 
-You need ant, maven and sbt.
+You need ant (optional), maven and sbt.
 
 From the integration tests root directory - akka-arquillian-tests run ant
 
@@ -33,7 +33,7 @@ akka-arquillian-webapp-tester/target/akka-arquillian-webapp-tester-1.0-SNAPSHOT.
 4. After deploying the wars go to http://localhost:9090//akka-arquillian-webapp-tester-1.0-SNAPSHOT/tests
 
 The path can be different to reflect your choice of name for the war files etc. What is important is that you invoke the Tests servlet via going to /tests.
-You will get a JSON response that contains an array of test method and a flag successful and also the stack trace and message.
+You will get a JSON response that contains an array of test method and a flag successful and also the stack trace and message if applicable.
 
  
 

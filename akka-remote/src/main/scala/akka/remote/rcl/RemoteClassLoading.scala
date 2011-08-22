@@ -49,6 +49,13 @@ object RemoteClassLoading {
   val classCache: ConcurrentMap[(UUID, String), Array[Byte]] = new MapMaker().concurrencyLevel(4).makeMap[(UUID, String), Array[Byte]]()
   val blacklisted: ConcurrentMap[(UUID, String), Boolean] = new MapMaker().concurrencyLevel(4).makeMap[(UUID, String), Boolean]()
 
+  def extractFqn(ncdfe: NoClassDefFoundError) = {
+    val message = ncdfe.getMessage.replace('/', '.')
+    if (message.startsWith("L") && message.endsWith(";"))
+      message.substring(1, message.length() - 1)
+    message
+  }
+
 }
 
 class RetryWillBeAttemptedException extends RuntimeException {
@@ -124,7 +131,7 @@ class RemoteClassLoadingSupport(val clientCl: Option[ClassLoader]) {
   val mutex = new Object
 
   def handleBcresp(ctx: ChannelHandlerContext, event: ChannelEvent, arp: AkkaRemoteProtocol, fun: (ChannelHandlerContext, MessageEvent) => Any): Unit = mutex.synchronized[Unit] {
-    if (!arp.getInstruction.hasExtension(RemoteProtocol.bcresp)) {
+     if (!arp.getInstruction.hasExtension(RemoteProtocol.bcresp)) {
       EventHandler.warning(this, "Corrupt rcl response headers. Possible bug or you are doing something ungodly with the message.")
       return
     }
@@ -212,6 +219,7 @@ class RemoteClassLoadingSupport(val clientCl: Option[ClassLoader]) {
 
 
   def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent, fun: (ChannelHandlerContext, MessageEvent) => Any) {
+    println("Received " + event.getMessage)
     event.getMessage match {
       case arp: AkkaRemoteProtocol if arp.hasInstruction && arp.getInstruction.getCommandType == CommandType.BYTE_CODE_REQUEST => handleBcreq(ctx, event, arp)
       case arp: AkkaRemoteProtocol if arp.hasInstruction && arp.getInstruction.getCommandType == CommandType.BYTE_CODE_RESPONSE => handleBcresp(ctx, event, arp, fun)
@@ -243,6 +251,7 @@ class RemoteClassLoadingSupport(val clientCl: Option[ClassLoader]) {
     try {
       deserialize(protocol)
     } catch {
+      case ncdfe: NoClassDefFoundError => handleCnfe(protocol.getRclId, ncdfe.getCause.asInstanceOf[ClassNotFoundException].getMessage, ctx, event, fun)
       case cnfe: ClassNotFoundException => handleCnfe(protocol.getRclId, cnfe.getMessage, ctx, event, fun)
       case t: Throwable => throw t
     }
@@ -324,15 +333,15 @@ class RemoteClassLoader(val id: UUID) extends ClassLoader(null) {
   def defineClass(fqn: String, bytecode: Array[Byte], rcl: UUID): Class[_] = {
     try {
       val clazz = defineClass(fqn, bytecode, 0, bytecode.length)
-      // linking the class
+      // linking the class might not force NCDFE for linked classes
+      // e.g. BazCyclic needs Baz but BazCyclic will get successfuly linked even if we are missing Baz
       resolveClass(clazz)
       // we can safely remove the class from the classCache
       RemoteClassLoading.classCache.remove((rcl, fqn))
       clazz
-    }
-    catch {
+    } catch {
       // define will call findClass (throwing CNFE) but the method will instead throw the NCDFE
-      case ncdfe: NoClassDefFoundError => throw new ClassNotFoundException(ncdfe.getMessage.replace('/', '.'))
+      case ncdfe: NoClassDefFoundError => throw ncdfe.getCause.asInstanceOf[ClassNotFoundException] // cause should be CNFE
       case t: Throwable => throw t // we can get ClassFormatError or SecurityException or X
     }
 

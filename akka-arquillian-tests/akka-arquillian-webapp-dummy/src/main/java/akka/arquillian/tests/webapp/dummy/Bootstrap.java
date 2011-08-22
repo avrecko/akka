@@ -1,7 +1,9 @@
 package akka.arquillian.tests.webapp.dummy;
 
 import akka.actor.Actors;
+import akka.arquillian.tests.common.Settings;
 import akka.arquillian.tests.webapp.dummy.actors.EchoActor;
+import akka.arquillian.tests.webapp.dummy.actors.ExceptionActor;
 import akka.arquillian.tests.webapp.dummy.actors.MessageOrderTestActor;
 
 import javax.servlet.ServletContextEvent;
@@ -21,10 +23,10 @@ public class Bootstrap implements ServletContextListener {
     @Override
     public void contextInitialized(ServletContextEvent servletContextEvent) {
         System.out.println("Started Server Bootstrap");
-        remote().start("localhost", 4273);
-
+        remote().start(Settings.HOST, Settings.PORT);
         remote().register("echo-actor", Actors.actorOf(EchoActor.class));
         remote().register("message-order-actor", Actors.actorOf(MessageOrderTestActor.class));
+        remote().register("exception-actor", Actors.actorOf(ExceptionActor.class));
     }
 
     @Override

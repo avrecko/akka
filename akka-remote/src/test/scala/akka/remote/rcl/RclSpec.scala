@@ -1,27 +1,21 @@
 package akka.remote.rcl
 
-import akka.remote.netty.NettyRemoteSupport
 import akka.actor.Actor._
 import akka.actor.Actor
 import org.scalatest.matchers.MustMatchers
-import akka.event.EventHandler.DefaultListener
 import org.scalatest.{BeforeAndAfterAll, FeatureSpec, GivenWhenThen}
 import akka.util.duration._
 import org.jboss.shrinkwrap.api.spec.JavaArchive
 import java.io.File
-import com.google.common.io.Files
-import annotation.tailrec
 import collection.mutable.ListBuffer
-import com.google.common.collect.Lists
-import org.jboss.shrinkwrap.api.{ArchivePaths, ShrinkWrap}
+import org.jboss.shrinkwrap.api.ShrinkWrap
 import org.jboss.shrinkwrap.api.classloader.ShrinkWrapClassLoader
 import org.jboss.shrinkwrap.api.importer.ExplodedImporter
 import java.lang.ClassNotFoundException
-
 object RclSpecSettings {
   val host = "localhost"
   val port = 4270
-  val timeout = 2.seconds
+  val timeout = 200.seconds
 
   val maxNumberToSend = 3
   val runs = 1
@@ -83,40 +77,40 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
     val actor = remote.actorFor("test", RclSpecSettings.host, RclSpecSettings.port)
     val messageOrderActor = remote.actorFor("message-order-test", RclSpecSettings.host, RclSpecSettings.port)
 
-    scenario("Sending java. and scala. code should work as expected") {
-      given("Simple string should return a simple response")
-      val reply = (actor.?("PING")(timeout = RclSpecSettings.timeout)).as[String]
-      reply.get must equal("PONG")
-    }
-
-    scenario("A simple message - Bar - is sent from test to the remote test node") {
-      given("a message with unknown class on the remote test node")
-      val msg = Messages.newBar()
-      when("the message is sent to the server node")
-
-      val reply = (actor.?(msg)(timeout = RclSpecSettings.timeout)).as[AnyRef]
-
-      then("remote node should ask the client node to supply it with the bytecode")
-      and("complete then complete the message invocation normally")
-
-      msg.getClass must be eq (reply.get.getClass)
-    }
-
-    scenario("Two messages with same class name but different bytecode are sent") {
-      given("Two messages with same FQN but different classloader")
-      val msg1 = Messages.newFooSimpleInheritenceA
-      val msg2 = Messages.newFooSimpleInheritenceB
-
-      when("the two messages are received on the server node")
-      val reply1 = (actor.?(msg1)(timeout = RclSpecSettings.timeout)).as[AnyRef]
-      val reply2 = (actor.?(msg2)(timeout = RclSpecSettings.timeout)).as[AnyRef]
-
-      then("remote node should resolve the missing bytecode correctly with classloaders in mind")
-      and("complete the invocations normally")
-
-      reply1.get.getClass must equal(msg1.getClass)
-      reply2.get.getClass must equal(msg2.getClass)
-    }
+//    scenario("Sending java. and scala. code should work as expected") {
+//      given("Simple string should return a simple response")
+//      val reply = (actor.?("PING")(timeout = RclSpecSettings.timeout)).as[String]
+//      reply.get must equal("PONG")
+//    }
+//
+//    scenario("A simple message - Bar - is sent from test to the remote test node") {
+//      given("a message with unknown class on the remote test node")
+//      val msg = Messages.newBar()
+//      when("the message is sent to the server node")
+//
+//      val reply = (actor.?(msg)(timeout = RclSpecSettings.timeout)).as[AnyRef]
+//
+//      then("remote node should ask the client node to supply it with the bytecode")
+//      and("complete then complete the message invocation normally")
+//
+//      msg.getClass must be eq (reply.get.getClass)
+//    }
+//
+//    scenario("Two messages with same class name but different bytecode are sent") {
+//      given("Two messages with same FQN but different classloader")
+//      val msg1 = Messages.newFooSimpleInheritenceA
+//      val msg2 = Messages.newFooSimpleInheritenceB
+//
+//      when("the two messages are received on the server node")
+//      val reply1 = (actor.?(msg1)(timeout = RclSpecSettings.timeout)).as[AnyRef]
+//      val reply2 = (actor.?(msg2)(timeout = RclSpecSettings.timeout)).as[AnyRef]
+//
+//      then("remote node should resolve the missing bytecode correctly with classloaders in mind")
+//      and("complete the invocations normally")
+//
+//      reply1.get.getClass must equal(msg1.getClass)
+//      reply2.get.getClass must equal(msg2.getClass)
+//    }
 
     scenario("A message with cyclic references is sent.") {
       given("A message with cyclic references")
@@ -135,14 +129,14 @@ class RclSpec extends FeatureSpec with GivenWhenThen with BeforeAndAfterAll with
       clazz must equal(clazz1)
     }
 
-    scenario("A message ordering must be respect at all times specially when RCL request happens") {
-      for (i <- 1 to RclSpecSettings.runs) {
-        messageOrderActor ! Messages.newDummyAlwaysNewCl
-        for (n <- 1 to RclSpecSettings.maxNumberToSend) messageOrderActor ! n
-        val outOfOrder = (messageOrderActor.?(MessageOrderTestConstants.isOutOfOrder)(timeout = RclSpecSettings.timeout)).as[Boolean]
-        outOfOrder.get must equal(false)
-      }
-    }
+//    scenario("A message ordering must be respect at all times specially when RCL request happens") {
+//      for (i <- 1 to RclSpecSettings.runs) {
+//        messageOrderActor ! Messages.newDummyAlwaysNewCl
+//        for (n <- 1 to RclSpecSettings.maxNumberToSend) messageOrderActor ! n
+//        val outOfOrder = (messageOrderActor.?(MessageOrderTestConstants.isOutOfOrder)(timeout = RclSpecSettings.timeout)).as[Boolean]
+//        outOfOrder.get must equal(false)
+//      }
+//    }
 
     scenario("If bytecode is not available the message should be forwared to remote server/client") {
       pending

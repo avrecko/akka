@@ -6,9 +6,8 @@ import com.google.common.io.Resources
 import scala.collection.JavaConversions._
 import java.io.{ByteArrayInputStream, Serializable}
 import java.util.HashMap
-import com.google.common.collect.{Maps, ImmutableBiMap, ImmutableMap}
+import com.google.common.collect.{ImmutableBiMap, ImmutableMap}
 import java.util.Map.Entry
-
 /**
  * Provides low-level plumbing needed by RclSpec.
  */
@@ -56,11 +55,13 @@ object Messages {
 
 
 class BarPaddedName extends Serializable
+
 class FooSimpleInheritenceA extends BarPaddedName
+
 class FooSimpleInheritenceB extends BarPaddedName
 
 
-class BazWithCyclic extends QuxPaddedName {
+class BazWithCyclic extends Serializable {
   @volatile var qux: QuxPaddedName = null;
 }
 

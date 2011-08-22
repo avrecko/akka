@@ -78,7 +78,7 @@ abstract public class AbstractArquillianTest {
         ArrayList<Throwable> problems = Lists.newArrayList();
         for (RemoteTestMethodResult method : result.methods) {
             if(!method.successful) {
-                problems.add(new RuntimeException(method.stackTrace));
+                problems.add(new RuntimeException("Failed run " + method.name +"\n"+ method.stackTrace));
             }
         }
 

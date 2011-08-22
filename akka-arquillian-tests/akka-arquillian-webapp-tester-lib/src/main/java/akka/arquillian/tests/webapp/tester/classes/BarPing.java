@@ -1,4 +1,6 @@
-package akka.remote.rcl.arquillian.rcl.arquillian;
+package akka.arquillian.tests.webapp.tester.classes;
+
+import java.io.Serializable;
 
 /**
  * Created by IntelliJ IDEA.
@@ -7,5 +9,5 @@ package akka.remote.rcl.arquillian.rcl.arquillian;
  * Time: 8:04 PM
  * To change this template use File | Settings | File Templates.
  */
-public class FooPing extends BarPing{
+public class BarPing implements Serializable{
 }

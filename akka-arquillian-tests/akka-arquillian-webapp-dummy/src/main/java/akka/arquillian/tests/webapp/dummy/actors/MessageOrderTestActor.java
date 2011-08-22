@@ -23,7 +23,7 @@ public class MessageOrderTestActor extends UntypedActor {
             else expecting++;
             return;
         }
-        if (expecting.equals(MSG_ORDER_TEST_X) && !(message instanceof Integer)) {
+        if (expecting.equals(MSG_ORDER_TEST_X) && !(message instanceof Number)) {
             expecting = 1;
             return;
         }

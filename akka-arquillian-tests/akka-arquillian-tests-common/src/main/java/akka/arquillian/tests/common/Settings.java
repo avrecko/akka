@@ -11,6 +11,6 @@ public class Settings {
     public static final Integer MSG_ORDER_TEST_X = Integer.valueOf(-1);
 
 
-
-
+    public static final String HOST = "localhost";
+    public static final int PORT = 4270;
 }

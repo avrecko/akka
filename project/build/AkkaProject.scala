@@ -22,7 +22,7 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
         //"-optimise",
         "-encoding", "utf8")
 
-  val javaCompileSettings = Seq("-Xlint:unchecked")
+  val javaCompileSettings = Seq("-Xlint:unchecked") ++ Seq("-g")
 
   // -------------------------------------------------------------------------------------------------------------------
   // All repositories *must* go here! See ModuleConigurations below.
@@ -81,11 +81,11 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
   lazy val JACKSON_VERSION       = "1.8.0"
   lazy val JERSEY_VERSION        = "1.3"
   lazy val MULTIVERSE_VERSION    = "0.6.2"
-  lazy val SCALATEST_VERSION     = "1.4.1"
+  lazy val SCALATEST_VERSION     = "1.6.1"
   lazy val JETTY_VERSION         = "7.4.0.v20110414"
   lazy val JAVAX_SERVLET_VERSION = "3.0"
   lazy val SLF4J_VERSION         = "1.6.0"
-  lazy val ARQUILLIAN_VERSION    = "1.0.0.Alpha5"
+  lazy val ARQUILLIAN_VERSION    = "1.0.0.CR1"
 
   // -------------------------------------------------------------------------------------------------------------------
   // Dependencies
@@ -151,7 +151,15 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     lazy val scalatest      = "org.scalatest"          %% "scalatest"          % SCALATEST_VERSION % "test" //ApacheV2
 
     lazy val asmAll = "asm" % "asm-all" % "3.3.1" % "test"// BSD Like
-    lazy val arquillianJunit = "org.jboss.arquillian" % "arquillian-junit" % ARQUILLIAN_VERSION % "test"
+    lazy val arquillianJunit = "org.jboss.arquillian.junit" % "arquillian-junit-container" % ARQUILLIAN_VERSION % "test"
+
+    // arquillian stuff
+    lazy val arquillianJettyEmbedded7 = "org.jboss.arquillian.container" % "arquillian-jetty-embedded-7" % ARQUILLIAN_VERSION % "test"
+    lazy val arquillianJettyWebApp = "org.eclipse.jetty" % "jetty-webapp" % "7.0.2.v20100331" % "test"
+    lazy val arquillianJettyPlus = "org.eclipse.jetty" % "jetty-plus" % "7.0.2.v20100331" % "test"
+    lazy val cdiShitNeededByArquillian = "javax.enterprise" % "cdi-api" % "1.0-SP1" % "test"
+    lazy val servletSpec = "javax.servlet" % "servlet-api" % "2.5" % "provided"
+
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -335,6 +343,9 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     val scalatest = Dependencies.scalatest
     val asmAll = Dependencies.asmAll
     val arquillianJunit = Dependencies.arquillianJunit
+    val arquillianJettyEmbedded7 = Dependencies.arquillianJettyEmbedded7
+    val arquillianJettyWebApp = Dependencies.arquillianJettyWebApp
+    val arquillianJettyPlus = Dependencies.arquillianJettyPlus
 
     lazy val networkTestsEnabled = systemOptional[Boolean]("akka.test.network", false)
     lazy val useTestConfig = systemOptional[String]("akka.config", "foobar")
@@ -342,6 +353,13 @@ class AkkaParentProject(info: ProjectInfo) extends ParentProject(info) with Exec
     override def testOptions = super.testOptions ++ {
       if (!networkTestsEnabled.value) Seq(TestFilter(test => !test.endsWith("NetworkTest")))
       else Seq.empty
+    }
+
+    override protected def docAction = myTask
+
+    def myTask = task {
+      Console.println("I am getting /Users/avrecko/Projects/akka/akka-remote/src/main/java/akka/remote/protocol/RemoteProtocol.java:8097: not found: type BuilderParent\n[error]       private Builder(BuilderParent parent) { Override the doc to do nothing.")
+      None
     }
   }
 

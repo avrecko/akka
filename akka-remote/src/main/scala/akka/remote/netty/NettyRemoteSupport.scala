@@ -612,7 +612,7 @@ class ActiveRemoteClientHandler(
                   message = deserialize(reply.getMessage, ctx, event)
                 } catch {
                   case retry:RetryWillBeAttemptedException => {
-                    // add it again ;) RCL will attmept this again
+                    // add it again ;) RCL will attepmt this again
                     futures.put(replyUuid, future)
                     return
                   }
@@ -719,7 +719,6 @@ class RemoteClassLoadingActiveRemoteClientHandler(
   extends ActiveRemoteClientHandler(name, futures,supervisors,bootstrap,remoteAddress,timer,client) {
 
   override def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent) = {
-    EventHandler.info(this,"RclArc received at "  + System.nanoTime() + " - " + event.getMessage)
     client.rclSupport.messageReceived(ctx, event, super.messageReceived _)
   }
 
@@ -1108,22 +1107,25 @@ class RemoteServerHandler(
       case _                       ⇒ None
     }
 
-  private def handleRemoteMessageProtocol(request: RemoteMessageProtocol, ctx:ChannelHandlerContext, event:MessageEvent) = try {
-    val deserializedMessage = deserialize(request.getMessage, ctx, event) // make sure we can deserialize before continuing
+  private def handleRemoteMessageProtocol(request: RemoteMessageProtocol, ctx: ChannelHandlerContext, event: MessageEvent) = try {
+    val deserializedMessage = deserialize(request.getMessage, ctx, event)
+    // make sure we can deserialize before continuing
     request.getActorInfo.getActorType match {
       case SCALA_ACTOR ⇒ dispatchToActor(request, event.getChannel, deserializedMessage)
       case TYPED_ACTOR ⇒ dispatchToTypedActor(request, event.getChannel, deserializedMessage)
-      case JAVA_ACTOR  ⇒ throw new IllegalActorStateException("ActorType JAVA_ACTOR is currently not supported")
-      case other       ⇒ throw new IllegalActorStateException("Unknown ActorType [" + other + "]")
+      case JAVA_ACTOR ⇒ throw new IllegalActorStateException("ActorType JAVA_ACTOR is currently not supported")
+      case other ⇒ throw new IllegalActorStateException("Unknown ActorType [" + other + "]")
     }
   } catch {
-    case retry:RetryWillBeAttemptedException => // silently ignore
-    case e: Exception ⇒
-      server.notifyListeners(RemoteServerError(e, server))
-      EventHandler.error(e, this, e.getMessage)
+    case retry: RetryWillBeAttemptedException => // ignore
+    case t: Throwable ⇒
+      server.notifyListeners(RemoteServerError(t, server))
+      EventHandler.error(t, this, t.getMessage)
   }
 
-  private def dispatchToActor(request: RemoteMessageProtocol, channel: Channel, message:Any) {
+
+
+    private def dispatchToActor(request: RemoteMessageProtocol, channel: Channel, message:Any) {
     val actorInfo = request.getActorInfo
 
     val actorRef =
@@ -1403,7 +1405,7 @@ class RemoteServerHandler(
             /*            val e = new RemoteServerException("Can't load remote Typed Actor for [" + actorInfo.getId + "]")
             EventHandler.error(e, this, e.getMessage)
             server.notifyListeners(RemoteServerError(e, server))
-            throw e            
+            throw e
 */ createClientManagedTypedActor(actorInfo) // client-managed actor
           case sessionActor ⇒ sessionActor
         }
@@ -1467,12 +1469,10 @@ class RemoteClassLoadingServerHandler(name: String,
   }
 
   override def deserialize(protocol: MessageProtocol, ctx:ChannelHandlerContext, event:MessageEvent) = {
-    println("Deserialize called")
     rclSupport.deserialize(protocol, ctx, event, super.messageReceived _)
   }
 
   override def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent):Unit = {
-    EventHandler.info(this,"RCL RS received at "  + System.nanoTime() + " - " + event.getMessage)
     rclSupport.messageReceived(ctx, event, super.messageReceived _)
   }
 }

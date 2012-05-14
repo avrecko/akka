@@ -21,14 +21,53 @@ import static java.util.Arrays.asList;
 
 public class URLishClassLoaderUtil {
 
-    /**
-     * Copies all found .class files matching the fqnPattern to a temp dir and adding the temp dir to the specified urlish classloader.
-     *
-     * @param fqnPattern
-     * @param urlishClassloader
-     */
-    public static void copyToPrivateSpace(String fqnPattern, ClassLoader urlishClassloader){
 
+    public static void initialize(Class<?>... classes) {
+        for (Class<?> clazz : classes) {
+            try {
+                Class.forName(clazz.getName(), true, clazz.getClassLoader());
+            } catch (ClassNotFoundException e) {
+                throw new AssertionError(e);
+            }
+        }
+    }
+
+    public static void deleteFromClassPath(String fileNameContains, ClassLoader urlishClassloader) {
+        ImmutableList<File> cp = filterClassPath(findClassPathFor(urlishClassloader));
+        try {
+            for (File file : cp) {
+                deleteFromClassPath(fileNameContains, file);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static void deleteFromClassPath(String fileNameContains, File currentDir) throws Exception {
+        if (currentDir.exists() && currentDir.isDirectory()) {
+            File[] files = currentDir.listFiles();
+            for (File file : files) {
+                if (file.exists()) {
+                    if (file.isDirectory()) {
+                        deleteFromClassPath(fileNameContains, file);
+                    } else {
+                        // must be a file
+                        if (file.getName().contains(fileNameContains)) {
+                            if (!file.delete()) {
+                                // try a couple of more times
+                                int retry = 100;
+                                while (!file.delete() && retry-- > 0) {
+                                    Thread.sleep(10);
+                                    if (retry == 0) {
+                                        throw new RuntimeException("Failed to delete file. Cannot guarantee delete from class path.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public static ImmutableList<File> filterClassPath(List<File> files) {
@@ -88,7 +127,7 @@ public class URLishClassLoaderUtil {
         }));
     }
 
-    private static  URL[] findUrlsInClass(Class<?> clazz, ClassLoader loader) {
+    private static URL[] findUrlsInClass(Class<?> clazz, ClassLoader loader) {
         while (clazz != Object.class) {
             for (Method method : clazz.getMethods()) {
                 URL[] urls = findUrlsInMethod(method, loader);
@@ -138,7 +177,7 @@ public class URLishClassLoaderUtil {
                             urls.add((URL) next);
                         }
                         return urls.toArray(new URL[urls.size()]);
-                    }   else {
+                    } else {
                         return null;
                     }
                 }

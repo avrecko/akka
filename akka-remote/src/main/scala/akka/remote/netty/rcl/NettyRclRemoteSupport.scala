@@ -19,7 +19,7 @@ import com.typesafe.config.ConfigFactory
 import akka.dispatch.Await
 import java.io.File
 
-class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
+class BlockingRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
 
   val systemClassLoader = _system.dynamicAccess.classLoader
 

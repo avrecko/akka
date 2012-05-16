@@ -9,11 +9,15 @@ import akka.util.duration._
 import akka.remote.rcl.ThreadLocalReflectiveDynamicAccess
 import org.fest.reflect.core.Reflection
 import akka.actor._
+import akka.pattern.ask
 import akka.remote.RemoteProtocol.RemoteMessageProtocol
 import com.google.protobuf.ByteString
 import com.google.common.base.Charsets
 import akka.remote.{RemoteProtocol, RemoteMessage, RemoteActorRefProvider}
 import com.google.common.cache.{CacheLoader, CacheBuilder}
+import com.typesafe.config.ConfigFactory
+import akka.dispatch.Await
+import java.io.File
 
 class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
 
@@ -25,15 +29,33 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
 
   lazy val addressAsByteString = ByteString.copyFrom(address.toString, Charsets.UTF_8.name())
 
+  val rclPort:Double = 11111 + (Math.random * 1000)
+
+  val rclIsolatedSystem = {
+    ActorSystem("RCL", ConfigFactory.parseString( """akka {
+  actor {
+    provider = "akka.remote.RemoteActorRefProvider"
+  }
+  remote {
+    transport = "akka.remote.netty.NettyRemoteTransport"
+    netty {
+      hostname = "127.0.0.1"
+      port = %s
+    }
+ }
+}""" format rclPort).withFallback(ConfigFactory.parseFile(new File("/Users/avrecko/Projects/akka/akka-remote/src/multi-jvm/scala/akka.conf"))))
+  }
+
+
   val remoteClassLoaders = CacheBuilder.newBuilder().build(new CacheLoader[ByteString, ActorfulRclClassLoader] {
-    def load(key: ByteString) = new ActorfulRclClassLoader(systemClassLoader, _system.actorFor(key.toStringUtf8 + "/user/RemoteClassLoading"), rclActor, key)
+    def load(key: ByteString) = {
+      val utf = key.toStringUtf8
+      println(utf)
+      new ActorfulRclClassLoader(systemClassLoader, rclIsolatedSystem.actorFor(utf + "/user/RemoteClassLoading"), key)
+    }
   })
 
-  // register our classloader origin actor
-  // todo I don't like that is registered under /user/RemoteClassLoading
-  // ideally we'd have /rcl or I can target /remote and intercept it before remote daemon gets it
-  // need some advice
-  val rclActor = _system.actorOf(Props {
+  val rclActor = rclIsolatedSystem.actorOf(Props {
     new RclActor(systemClassLoader)
   }, "RemoteClassLoading")
 
@@ -60,7 +82,7 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
         val name = ref.getClass.getCanonicalName
         ref.getClass.getClassLoader match {
           case rcl: ActorfulRclClassLoader ⇒ RclMetadata.addOrigin(pb, rcl.originAddress)
-          case cl: ClassLoader if !name.startsWith("java.") && !name.startsWith("scala.") ⇒ RclMetadata.addOrigin(pb, addressAsByteString)
+          case cl: ClassLoader if !name.startsWith("java.") && !name.startsWith("scala.") ⇒ RclMetadata.addOrigin(pb, ByteString.copyFrom("akka://RCL@127.0.0.1:" + rclPort.asInstanceOf[Int], Charsets.UTF_8.name()))
           case _ ⇒ // don't tag
         }
       }
@@ -90,27 +112,10 @@ object RclMetadata {
   }
 }
 
-class ActorfulRclClassLoader(parent: ClassLoader, origin: ActorRef, self: ActorRef, val originAddress: ByteString) extends ClassLoader(parent) {
+class ActorfulRclClassLoader(parent: ClassLoader, origin: ActorRef, val originAddress: ByteString) extends ClassLoader(parent) {
 
   implicit val timeout = Timeout(100 seconds)
 
-
-  override def loadClass(name: String, resolve: Boolean): Class[_] = {
-    var c = findLoadedClass(name);
-    if (c == null) {
-      try {
-        if (parent != null) {
-          c = parent.loadClass(name);
-        }
-      } catch {
-        case e: ClassNotFoundException => c = findClass(name);
-      }
-    }
-    if (resolve) {
-      resolveClass(c);
-    }
-    c;
-  }
 
   // normally this is dangerous as findClass is synchronized but we are safe as the
   // rcl mechanism internally doesn't require to touch remote classloaders to operate itself
@@ -119,13 +124,20 @@ class ActorfulRclClassLoader(parent: ClassLoader, origin: ActorRef, self: ActorR
     println("Remote actor is " + origin.getClass)
     println("Remote actor is " + origin.path.address)
     // lets ask the origin for this class
-    origin.tell(DoYouHaveThisClass(fqn), self)
-    Thread.sleep(10000000)
-    throw new ClassNotFoundException(fqn)
+    val future = origin ? DoYouHaveThisClass(fqn)
+
+    Await.result(future, timeout.duration)  match {
+      case  YesIHaveThisClass(sender, fqn, bytecode)  =>{
+        println("Got result " + fqn)
+         defineClass(fqn, bytecode, 0, bytecode.length)
+      }
+
+      case _ =>  throw new ClassNotFoundException(fqn)
+    }
   }
 }
 
-class RclActor(urlishClassLoader: ClassLoader) extends Actor {
+class RclActor(val urlishClassLoader: ClassLoader) extends Actor {
 
   def receive = {
     case DoYouHaveThisClass(fqn) ⇒ {
@@ -140,12 +152,6 @@ class RclActor(urlishClassLoader: ClassLoader) extends Actor {
         case _ ⇒ sender ! NoIDontHaveThisClass(self, fqn)
       }
     }
-    case YesIHaveThisClass(sender, fqn, bytecode) => {
-      println("REceived YES!!!")
-    }
-    case NoIDontHaveThisClass(sender, fqn) => {
-      println("REceived NO!!!")
-    }
     case _ ⇒ // just drop it
   }
 }
@@ -155,3 +161,4 @@ case class DoYouHaveThisClass(fqn: String)
 case class YesIHaveThisClass(sender: ActorRef, fqn: String, bytecode: Array[Byte])
 
 case class NoIDontHaveThisClass(sender: ActorRef, fqn: String)
+

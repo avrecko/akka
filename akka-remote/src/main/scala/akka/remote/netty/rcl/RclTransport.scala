@@ -24,7 +24,7 @@ import akka.remote.RemoteProtocol.RemoteMessageProtocol
  * To change this template use File | Settings | File Templates.
  */
 
-class NettyRclRemoteTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
+class ForwardSyncRclRemoteTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
 
   val systemClassLoader = _system.dynamicAccess.classLoader
 
@@ -214,7 +214,7 @@ class RclMetadataWriter(rmb: RemoteMessageProtocol.Builder) {
 }
 
 // DUMMY ACTOR NEEDED FOR TARGETING THE REMOTE SYSTEM
-class DummyActor(rp: NettyRclRemoteTransport) extends Actor {
+class DummyActor(rp: ForwardSyncRclRemoteTransport) extends Actor {
   protected def receive = {
     case _ ⇒ rp.log.error("Dummy actor should not receive any messages. Bug!")
   }

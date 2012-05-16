@@ -29,7 +29,7 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
 
   lazy val addressAsByteString = ByteString.copyFrom(address.toString, Charsets.UTF_8.name())
 
-  val rclPort:Double = 11111 + (Math.random * 1000)
+  val rclPort: Double = 11111 + (Math.random * 1000)
 
   val rclIsolatedSystem = {
     ActorSystem("RCL", ConfigFactory.parseString( """akka {
@@ -47,11 +47,11 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
   }
 
 
-  val remoteClassLoaders = CacheBuilder.newBuilder().build(new CacheLoader[ByteString, ActorfulRclClassLoader] {
+  val remoteClassLoaders = CacheBuilder.newBuilder().build(new CacheLoader[ByteString, BlockingRclClassLoader] {
     def load(key: ByteString) = {
       val utf = key.toStringUtf8
       println(utf)
-      new ActorfulRclClassLoader(systemClassLoader, rclIsolatedSystem.actorFor(utf + "/user/RemoteClassLoading"), key)
+      new BlockingRclClassLoader(systemClassLoader, rclIsolatedSystem.actorFor(utf + "/user/RemoteClassLoading"), key)
     }
   })
 
@@ -60,7 +60,6 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
   }, "RemoteClassLoading")
 
   override def receiveMessage(remoteMessage: RemoteMessage) {
-    println("recevied msg " + remoteMessage.sender)
     RclMetadata.getOrigin(remoteMessage) match {
       case origin: ByteString ⇒ {
         try {
@@ -81,7 +80,7 @@ class ActorfulRclTransport(_system: ExtendedActorSystem, _provider: RemoteActorR
       case ref: AnyRef ⇒ {
         val name = ref.getClass.getCanonicalName
         ref.getClass.getClassLoader match {
-          case rcl: ActorfulRclClassLoader ⇒ RclMetadata.addOrigin(pb, rcl.originAddress)
+          case rcl: BlockingRclClassLoader ⇒ RclMetadata.addOrigin(pb, rcl.originAddress)
           case cl: ClassLoader if !name.startsWith("java.") && !name.startsWith("scala.") ⇒ RclMetadata.addOrigin(pb, ByteString.copyFrom("akka://RCL@127.0.0.1:" + rclPort.asInstanceOf[Int], Charsets.UTF_8.name()))
           case _ ⇒ // don't tag
         }
@@ -112,27 +111,18 @@ object RclMetadata {
   }
 }
 
-class ActorfulRclClassLoader(parent: ClassLoader, origin: ActorRef, val originAddress: ByteString) extends ClassLoader(parent) {
+class BlockingRclClassLoader(parent: ClassLoader, origin: ActorRef, val originAddress: ByteString) extends ClassLoader(parent) {
 
-  implicit val timeout = Timeout(100 seconds)
+  implicit val timeout = Timeout(19 seconds)
 
-
-  // normally this is dangerous as findClass is synchronized but we are safe as the
-  // rcl mechanism internally doesn't require to touch remote classloaders to operate itself
+  // normally it is not possible to block in here as this will in fact block the netty dispatcher i.e. no new stuff on this channel
+  // but we are using a secondary actor system just for RCL so it is safe to block
   override def findClass(fqn: String): Class[_] = {
-    println("Looking for " + fqn)
-    println("Remote actor is " + origin.getClass)
-    println("Remote actor is " + origin.path.address)
-    // lets ask the origin for this class
-    val future = origin ? DoYouHaveThisClass(fqn)
-
-    Await.result(future, timeout.duration)  match {
-      case  YesIHaveThisClass(sender, fqn, bytecode)  =>{
-        println("Got result " + fqn)
-         defineClass(fqn, bytecode, 0, bytecode.length)
+    Await.result(origin ? DoYouHaveThisClass(fqn), timeout.duration) match {
+      case YesIHaveThisClass(sender, fqn, bytecode) => {
+        defineClass(fqn, bytecode, 0, bytecode.length)
       }
-
-      case _ =>  throw new ClassNotFoundException(fqn)
+      case _ => throw new ClassNotFoundException(fqn)
     }
   }
 }
@@ -141,15 +131,12 @@ class RclActor(val urlishClassLoader: ClassLoader) extends Actor {
 
   def receive = {
     case DoYouHaveThisClass(fqn) ⇒ {
-      println("Asked about " + fqn)
       val resourceName = fqn.replaceAll("\\.", "/") + ".class"
       urlishClassLoader.getResource(resourceName) match {
         case url: URL ⇒ sender ! {
-          val array = Resources.toByteArray(url)
-          sender ! YesIHaveThisClass(self, fqn, array)
-          println("Replied with  " + fqn + " size of " + array.length)
+          sender ! YesIHaveThisClass( fqn, Resources.toByteArray(url))
         }
-        case _ ⇒ sender ! NoIDontHaveThisClass(self, fqn)
+        case _ ⇒ sender ! NoIDontHaveThisClass( fqn)
       }
     }
     case _ ⇒ // just drop it
@@ -158,7 +145,7 @@ class RclActor(val urlishClassLoader: ClassLoader) extends Actor {
 
 case class DoYouHaveThisClass(fqn: String)
 
-case class YesIHaveThisClass(sender: ActorRef, fqn: String, bytecode: Array[Byte])
+case class YesIHaveThisClass(fqn: String, bytecode: Array[Byte])
 
-case class NoIDontHaveThisClass(sender: ActorRef, fqn: String)
+case class NoIDontHaveThisClass(fqn: String)
 

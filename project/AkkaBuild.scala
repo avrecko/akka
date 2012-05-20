@@ -367,7 +367,7 @@ object Dependencies {
   val remote = Seq(
     netty, protobuf, Test.junit, Test.scalatest,
     Test.zookeeper, Test.log4j, // needed for ZkBarrier in multi-jvm tests
-    guava, fest_reflect, Test.path_hole // needed by RCL
+    guava, fest_reflect, asm, Test.path_hole // needed by RCL
   )
 
   val cluster = Seq(Test.junit, Test.scalatest)
@@ -418,6 +418,8 @@ object Dependency {
   val zeroMQ        = "org.zeromq"                  % "zeromq-scala-binding_2.9.1"  % "0.0.6" // ApacheV2
   val guava         = "com.google.guava"            % "guava"                  % "12.0" // ApacheV2
   val fest_reflect  = "org.easytesting"             % "fest-reflect"           % "1.3" // ApacheV2
+  val asm           = "asm"                         % "asm-commons"            % "3.3.1" // Custom OSS
+
   // Runtime
 
   object Runtime {

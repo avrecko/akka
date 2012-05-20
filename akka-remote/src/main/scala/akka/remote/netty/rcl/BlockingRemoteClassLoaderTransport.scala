@@ -18,8 +18,10 @@ import akka.pattern.ask
 import com.google.common.base.Charsets
 import com.google.common.cache.{ LoadingCache, CacheLoader, CacheBuilder }
 import util.Random
-import java.util.ArrayList
-import com.google.common.collect.Iterables
+import com.google.common.collect.{ Lists, ImmutableMap, Iterables }
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.commons.{ EmptyVisitor, RemappingClassAdapter, Remapper }
+import java.util.{ HashMap, HashSet, ArrayList }
 
 class BlockingRemoteClassLoaderTransport(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends NettyRemoteTransport(_system, _provider) {
 
@@ -107,14 +109,63 @@ class RclBlockingClassLoader(parent: ClassLoader, origin: ActorRef, val originAd
 
   implicit val timeout = Timeout(19 seconds)
 
+  var innerCall = false
+  val bytecodeCache = new HashMap[String, Array[Byte]]
+
   // normally it is not possible to block in here as this will in fact block the netty dispatcher i.e. no new stuff on this channel
   // but we are using a secondary actor system just for RCL so it is safe to block
   override def findClass(fqn: String): Class[_] = {
-    Await.result(origin ? DoYouHaveThisClass(fqn), timeout.duration) match {
-      case YesIHaveThisClass(fqn, bytecode) ⇒ defineClass(fqn, bytecode, 0, bytecode.length)
-      case _                                ⇒ throw new ClassNotFoundException(fqn)
+    // when asking ourself if we already loaded a class we must not enter again the rcl logic
+    if (innerCall) throw new ClassNotFoundException(fqn)
+    // prepare cache
+    try {
+      innerCall = true;
+      bytecodeCache.putAll(getDirectlyReferencesClassesByteCode(fqn))
+    } finally {
+      innerCall = false;
+    }
+    // cache is prepared lets load the class
+    bytecodeCache.get(fqn) match {
+      case bytecode: Array[Byte] ⇒ defineClass(fqn, bytecode, 0, bytecode.length)
+      case _                     ⇒ throw new ClassNotFoundException(fqn)
     }
   }
+
+  def getDirectlyReferencesClassesByteCode(fqn: String): java.util.Map[String, Array[Byte]] = {
+    // first lets get all the fqns of directly references classes
+    val referencedFqns = Await.result(origin ? GiveMeReferencedClassesFor(fqn), timeout.duration) match {
+      case ListOfReferencedClassesFor(fqn, referencedFqns) ⇒ referencedFqns
+      case _ ⇒ throw new ClassNotFoundException(fqn)
+    }
+
+    // lets figure out if we have some of the needed classes already loaded  by us
+    // or if we already have this in the code cache
+    val neededClasses = referencedFqns.filter(fqn ⇒ {
+      try {
+        // this is why we need the innerCall to throw exception
+        loadClass(fqn)
+        false
+      } catch {
+        case _ ⇒ true
+      }
+    }).filter(!bytecodeCache.containsKey(_))
+
+    // lets ask for the classes we know we need
+    Await.result(origin ? GiveMeByteCodesFor(neededClasses), timeout.duration) match {
+      case ByteCodesFor(map2) ⇒ map2
+      case _                  ⇒ throw new ClassNotFoundException(fqn)
+    }
+  }
+
+  def simpleRcl(fqn: String): Class[_] = {
+    Await.result(origin ? GiveMeByteCodeFor(fqn), timeout.duration) match {
+      case ByteCodeFor(fqn, bytecode) ⇒ {
+        defineClass(fqn, bytecode, 0, bytecode.length)
+      }
+      case _ ⇒ throw new ClassNotFoundException(fqn)
+    }
+  }
+
 }
 
 object RclMetadata {
@@ -183,21 +234,83 @@ object RclConfig {
 class RclActor(val urlishClassLoader: ClassLoader) extends Actor {
 
   def receive = {
-    case DoYouHaveThisClass(fqn) ⇒ {
-      val resourceName = fqn.replaceAll("\\.", "/") + ".class"
-      urlishClassLoader.getResource(resourceName) match {
-        case url: URL ⇒ sender ! {
-          sender ! YesIHaveThisClass(fqn, Resources.toByteArray(url))
+    case GiveMeByteCodeFor(fqn) ⇒ getBytecode(fqn) match {
+      case bytecode: Array[Byte] ⇒ sender ! ByteCodeFor(fqn, bytecode)
+      case _                     ⇒ sender ! ByteCodeNotAvailable(fqn)
+    }
+
+    case GiveMeByteCodesFor(fqns) ⇒ {
+      val builder = ImmutableMap.builder[String, Array[Byte]]()
+      val missing = Lists.newArrayList[String];
+      for (fqn ← fqns) {
+        getBytecode(fqn) match {
+          case bytecode: Array[Byte] ⇒ builder.put(fqn, bytecode)
+          case _                     ⇒ missing.add(fqn)
         }
-        case _ ⇒ sender ! NoIDontHaveThisClass(fqn)
+      }
+
+      missing.isEmpty match {
+        case true ⇒ sender ! ByteCodesFor(builder.build())
+        case _    ⇒ sender ! ByteCodesNotAvailable(Iterables.toArray(missing, classOf[String]))
       }
     }
-    case _ ⇒ // just drop it
+
+    case GiveMeReferencedClassesFor(fqn) ⇒ {
+      getBytecode(fqn) match {
+        case bytecode: Array[Byte] ⇒ sender ! ListOfReferencedClassesFor(fqn, Iterables.toArray(getReferences(bytecode), classOf[String]))
+        case _                     ⇒ sender ! ByteCodeNotAvailable(fqn)
+      }
+    }
+
+    case _ ⇒ // drop it
   }
+
+  def getBytecode(fqn: String): Array[Byte] = {
+    val resourceName = fqn.replaceAll("\\.", "/") + ".class"
+    urlishClassLoader.getResource(resourceName) match {
+      case url: URL ⇒ Resources.toByteArray(url)
+      case _        ⇒ null
+    }
+  }
+
+  def getReferences(bytecode: Array[Byte]): java.util.Set[String] = {
+    val classNames = new HashSet[String]();
+
+    val classReader = new ClassReader(bytecode);
+    val emptyVisitor = new EmptyVisitor();
+
+    val remapper = new ClassNameRecordingRemapper(classNames);
+    classReader.accept(new RemappingClassAdapter(emptyVisitor, remapper), 0);
+    classNames
+  }
+
+  class ClassNameRecordingRemapper(classNames: java.util.Set[String]) extends Remapper {
+
+    override def mapType(resource: String) = {
+      val fqn = resource.replaceAll("/", ".")
+      if (fqn != null && !fqn.startsWith("java.") && !fqn.startsWith("scala.")) {
+        classNames.add(fqn)
+      }
+      resource
+    }
+  }
+
 }
 
-case class DoYouHaveThisClass(fqn: String)
+// RCL Questions
+case class GiveMeByteCodeFor(fqn: String)
 
-case class YesIHaveThisClass(fqn: String, bytecode: Array[Byte])
+case class GiveMeByteCodesFor(fqns: Array[String])
 
-case class NoIDontHaveThisClass(fqn: String)
+case class GiveMeReferencedClassesFor(fqn: String)
+
+// RCL Answers
+case class ByteCodeFor(fqn: String, bytecode: Array[Byte])
+
+case class ByteCodesFor(bytecode: ImmutableMap[String, Array[Byte]])
+
+case class ByteCodeNotAvailable(fqn: String)
+
+case class ByteCodesNotAvailable(fqns: Array[String])
+
+case class ListOfReferencedClassesFor(fqn: String, references: Array[String])

@@ -1,10 +1,10 @@
 package akka.remote.rcl
 
-import akka.actor.{Actor, Props}
 import akka.remote.{RemoteActorRef, AkkaRemoteSpec, AbstractRemoteActorMultiJvmSpec}
-import akka.testkit._
 import akka.dispatch.Await
 import akka.pattern.ask
+import akka.util.Timeout
+import akka.actor.{Actor, Props}
 
 object MsgWithMethodMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
   override def NrOfNodes = 2
@@ -12,7 +12,6 @@ object MsgWithMethodMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
   class SomeActor extends Actor with Serializable {
     def receive = {
       case bo: BinaryOperation => sender ! bo.doIt(7, 9)
-      case "identify" ⇒ sender ! self
       case _ => // drop it
     }
   }
@@ -29,6 +28,9 @@ object MsgWithMethodMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
     def doIt(a: Int, b: Int) = a * b
   }
 
+  val NODE2_ADD_OP_FQN = "akka.remote.rcl.MsgWithMethodMultiJvmSpec$Node2AddOperation"
+  val NODE2_MULTIPLY_OP_FQN = "akka.remote.rcl.MsgWithMethodMultiJvmSpec$Node2MultiplyOperation"
+
   import com.typesafe.config.ConfigFactory
 
   override def commonConfig = ConfigFactory.parseString( """
@@ -40,7 +42,7 @@ object MsgWithMethodMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
           /service-hello.remote = %s
         }
       }
-      remote.transport = akka.remote.netty.rcl.NettyRclRemoteTransport
+      remote.transport = akka.remote.netty.rcl.BlockingRemoteClassLoaderTransport
       remote.netty.message-frame-size = 10 MiB
     }""" format akkaURIs(1))
 }
@@ -53,38 +55,42 @@ class MsgWithMethodMultiJvmNode1 extends AkkaRemoteSpec(nodeConfigs(0)) {
 
   val nodes = NrOfNodes
 
+  // need to make sure Node1 does NOT have Node2* classes on the classpath
+  // this requires a bit of heavy lifting since Multi-JVM plugin starts 2 JVMs but both point to the same classpath on disk
+  // lets use the path-hole agent to hide the classes from the classpath
+  // this will make any ClassLoaders exept for the unfiltered ones to throw CNFE even if the class is on the classpath
+  System.setProperty("path_hole.filter", "*Node2*")
+  System.setProperty("path_hole.unfiltered.cls", "akka.remote.netty.rcl.RclBlockingClassLoader")
+
   "___" must {
     "___" in {
+      intercept[ClassNotFoundException] {
+        Class.forName(NODE2_ADD_OP_FQN)
+      }
+      intercept[ClassNotFoundException] {
+        Class.forName(NODE2_MULTIPLY_OP_FQN)
+      }
       barrier("start")
-      intercept[ClassNotFoundException] {
-        Class.forName("akka.remote.rcl.MsgWithMethodMultiJvmSpec$Node2AddOperation")
-      }
-      intercept[ClassNotFoundException] {
-        Class.forName("akka.remote.rcl.MsgWithMethodMultiJvmSpec$Node2MultiplyOperation")
-      }
       barrier("done")
     }
   }
 }
 
 
-class MsgWithMethodMultiJvmNode2 extends AkkaRemoteSpec(nodeConfigs(1)) with DefaultTimeout {
+class MsgWithMethodMultiJvmNode2 extends AkkaRemoteSpec(nodeConfigs(1)) {
 
   import MsgWithMethodMultiJvmSpec._
 
   val nodes = NrOfNodes
 
+  import akka.util.duration._
+
+  implicit val timeout = Timeout(20 seconds)
+
+
   "Remote class loading" must {
     "properly work with messages that contain methods" in {
-      // need to make sure Node1 does NOT have Node2* classes on the classpath
-      // this requires a bit of heavy lifting since Multi-JVM plugin starts 2 JVMs but both point to the same classpath
-      // eagerly initialize the Node2 specific classes
-      URLishClassLoaderUtil.initialize(classOf[Node2AddOperation], classOf[Node2MultiplyOperation])
-      // delete the classes from the classpath this will make sure Node1 cannot load the classes
-      URLishClassLoaderUtil.deleteFromClassPath("MsgWithMethodMultiJvmSpec$Node2", this.getClass.getClassLoader)
-
       barrier("start")
-
       val actor = system.actorOf(Props[SomeActor], "service-hello")
       actor.isInstanceOf[RemoteActorRef] must be(true)
 

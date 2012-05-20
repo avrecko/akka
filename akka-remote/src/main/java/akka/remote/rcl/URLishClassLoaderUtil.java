@@ -5,6 +5,9 @@ import com.google.common.base.Predicate;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
+import com.google.common.collect.Lists;
+import com.google.common.io.Files;
+import org.fest.reflect.core.Reflection;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -32,27 +35,58 @@ public class URLishClassLoaderUtil {
         }
     }
 
-    public static void deleteFromClassPath(String fileNameContains, ClassLoader urlishClassloader) {
+    public static void moveToInternalClassPath(String fileNameContains, ClassLoader urlishClassloader) throws Exception {
+        File additionalDir =  addAdditionalPath(urlishClassloader);
+
         ImmutableList<File> cp = filterClassPath(findClassPathFor(urlishClassloader));
         try {
             for (File file : cp) {
-                deleteFromClassPath(fileNameContains, file);
+                moveToInternalClassPath(fileNameContains, file, file, additionalDir);
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public static void deleteFromClassPath(String fileNameContains, File currentDir) throws Exception {
+    private static File addAdditionalPath(ClassLoader urlishClassloader) throws Exception{
+        // find the add url method
+        Class<?> aClass = urlishClassloader.getClass();
+        while (aClass != Object.class) {
+            for (Method method : aClass.getDeclaredMethods()) {
+                Class<?>[] parameterTypes = method.getParameterTypes();
+                for (Class<?> type : parameterTypes) {
+                    if (type == URL.class) {
+                        System.out.println("Adding to " + method.getName() + " of " + urlishClassloader.getClass() + " ins " + urlishClassloader );
+                        File tempDir = Files.createTempDir();
+                        method.invoke(urlishClassloader, new Object[]{new URL("file://" + tempDir.getCanonicalPath())});
+                        return tempDir;
+                    }  else  if (type == URL[].class) {
+                        System.out.println("Adding to " + method.getName() + " of " + urlishClassloader.getClass() + " ins " + urlishClassloader );
+                        File tempDir = Files.createTempDir();
+                        method.invoke(urlishClassloader, new Object[]{new URL[]{new URL("file://" + tempDir.getCanonicalPath())}});
+                        return tempDir;
+                        }
+                    }
+
+            }
+            aClass = aClass.getSuperclass();
+        }
+        throw new IllegalArgumentException("Provided classloader of type " + urlishClassloader.getClass() + " is not URLish.");
+    }
+
+    public static void moveToInternalClassPath(String fileNameContains, File root, File currentDir, File copyToDir) throws Exception {
         if (currentDir.exists() && currentDir.isDirectory()) {
             File[] files = currentDir.listFiles();
             for (File file : files) {
                 if (file.exists()) {
                     if (file.isDirectory()) {
-                        deleteFromClassPath(fileNameContains, file);
+                        moveToInternalClassPath(fileNameContains, root, file, copyToDir);
                     } else {
                         // must be a file
                         if (file.getName().contains(fileNameContains)) {
+                            File copyToFullPath = new File(copyToDir, file.getCanonicalPath().substring(root.getCanonicalPath().length() + 1));
+                            Files.createParentDirs(copyToFullPath);
+                            Files.copy(file, copyToFullPath);
                             if (!file.delete()) {
                                 // try a couple of more times
                                 int retry = 100;

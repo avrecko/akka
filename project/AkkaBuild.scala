@@ -88,7 +88,8 @@ object AkkaBuild extends Build {
       },
       scalatestOptions in MultiJvm := Seq("-r", "org.scalatest.akka.QuietReporter"),
       jvmOptions in MultiJvm := {
-        if (getBoolean("sbt.log.noformat")) Seq("-Dakka.test.nocolor=true") else Nil
+        if (getBoolean("sbt.log.noformat")) Seq("-Dakka.test.nocolor=true") else Nil ++
+        Seq("-javaagent:" + System.getProperty("user.home") + "/.ivy2/cache/com.typesafe/path-hole/jars/path-hole-1.0.jar")
       },
       test in Test <<= (test in Test) dependsOn (test in MultiJvm)
     )
@@ -364,8 +365,9 @@ object Dependencies {
   )
 
   val remote = Seq(
-    netty, protobuf, guava, Test.junit, Test.scalatest,
-    Test.zookeeper, Test.log4j // needed for ZkBarrier in multi-jvm tests
+    netty, protobuf, Test.junit, Test.scalatest,
+    Test.zookeeper, Test.log4j, // needed for ZkBarrier in multi-jvm tests
+    guava, fest_reflect, Test.path_hole // needed by RCL
   )
 
   val cluster = Seq(Test.junit, Test.scalatest)
@@ -414,8 +416,8 @@ object Dependency {
   val scalaStm      = "org.scala-tools"             % "scala-stm_2.9.1"        % V.ScalaStm   // Modified BSD (Scala)
   val slf4jApi      = "org.slf4j"                   % "slf4j-api"              % V.Slf4j      // MIT
   val zeroMQ        = "org.zeromq"                  % "zeromq-scala-binding_2.9.1"  % "0.0.6" // ApacheV2
-  val guava        = "com.google.guava"                  % "guava"  % "12.0" // ApacheV2
-
+  val guava         = "com.google.guava"            % "guava"                  % "12.0" // ApacheV2
+  val fest_reflect  = "org.easytesting"             % "fest-reflect"           % "1.3" // ApacheV2
   // Runtime
 
   object Runtime {
@@ -434,5 +436,6 @@ object Dependency {
     val scalacheck  = "org.scala-tools.testing"     % "scalacheck_2.9.1"    % "1.9"        % "test" // New BSD
     val zookeeper   = "org.apache.hadoop.zookeeper" % "zookeeper"           % "3.4.0"      % "test" // ApacheV2
     val log4j       = "log4j"                       % "log4j"               % "1.2.14"     % "test" // ApacheV2
+    val path_hole   = "com.typesafe"                % "path-hole"           % "1.0"        % "test" from "https://github.com/avrecko/path-hole/raw/master/repository/com/typesafe/path-hole/1.0/path-hole-1.0.jar"
   }
 }
